@@ -1,0 +1,25 @@
+# Build output
+bin/
+obj/
+[Dd]ebug/
+[Rr]elease/
+x64/
+x86/
+*.user
+*.suo
+.vs/
+
+# Rider / VS Code
+.idea/
+
+# Secrets — never commit
+appsettings.Development.json
+appsettings.*.Local.json
+*.env
+secrets.json
+
+# Test results
+[Tt]est[Rr]esults/
+*.trx
+coverage*.json
+coverage*.xml

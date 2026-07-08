@@ -1,0 +1,6 @@
+@DIP.AgenticExtraction.Poc_HostAddress = http://localhost:5054
+
+GET {{DIP.AgenticExtraction.Poc_HostAddress}}/weatherforecast/
+Accept: application/json
+
+###

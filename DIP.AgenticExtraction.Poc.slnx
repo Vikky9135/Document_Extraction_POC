@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/DIP.AgenticExtraction.Poc/DIP.AgenticExtraction.Poc.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/DIP.AgenticExtraction.Poc.Tests/DIP.AgenticExtraction.Poc.Tests.csproj" />
+  </Folder>
+</Solution>
