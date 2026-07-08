@@ -1,17 +1,105 @@
+using System.Threading.Channels;
+using DIP.AgenticExtraction.Poc.Models;
+using DIP.AgenticExtraction.Poc.Options;
+using DIP.AgenticExtraction.Poc.Services;
+using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
+
 namespace DIP.AgenticExtraction.Poc.Endpoints;
 
 public static class ExtractionEndpoints
 {
-    // TODO (Step 4): implement upload, status, and result endpoints.
-    // POST /jobs/upload  — multipart PDF + userPrompt -> 202 Accepted { jobId }
-    // GET  /jobs/{id}/status — { jobId, status, error? }
-    // GET  /jobs/{id}/result — full ExtractionJobResult JSON
     public static void MapExtractionEndpoints(this WebApplication app)
     {
-        app.MapGet("/health", () => Results.Ok(new { status = "Healthy", utc = DateTime.UtcNow }));
+        // ── Health ────────────────────────────────────────────────────────────
+        app.MapGet("/health", () => Results.Ok(new { status = "Healthy", utc = DateTime.UtcNow }))
+           .WithName("Health")
+           .WithOpenApi();
 
-        // app.MapPost("/jobs/upload", ...);
-        // app.MapGet("/jobs/{id}/status", ...);
-        // app.MapGet("/jobs/{id}/result", ...);
+        // ── POST /jobs/upload ─────────────────────────────────────────────────
+        app.MapPost("/jobs/upload", async (
+            IFormFile file,
+            [FromForm] string userPrompt,
+            IBlobStorageService blobStorage,
+            IJobStore jobStore,
+            ChannelWriter<ExtractionJob> queue,
+            IOptions<AgenticExtractionOptions> opts,
+            CancellationToken ct) =>
+        {
+            if (!file.FileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                return Results.BadRequest(new { error = "Only PDF files are accepted." });
+
+            var maxBytes = (long)opts.Value.MaxFileSizeMb * 1024 * 1024;
+            if (file.Length > maxBytes)
+                return Results.BadRequest(new { error = $"File exceeds the {opts.Value.MaxFileSizeMb} MB limit." });
+
+            var jobId = Guid.CreateVersion7().ToString();
+
+            await using var stream = file.OpenReadStream();
+            await blobStorage.UploadPdfAsync(jobId, stream, ct);
+
+            jobStore.Set(jobId, JobStatus.Queued);
+
+            await queue.WriteAsync(new ExtractionJob
+            {
+                JobId      = jobId,
+                BlobPath   = $"jobs/{jobId}/source.pdf",
+                UserPrompt = userPrompt
+            }, ct);
+
+            return Results.Accepted($"/jobs/{jobId}/status", new
+            {
+                jobId,
+                status    = nameof(JobStatus.Queued),
+                pollUrl   = $"/jobs/{jobId}/status",
+                resultUrl = $"/jobs/{jobId}/result"
+            });
+        })
+        .DisableAntiforgery()
+        .Accepts<IFormFile>("multipart/form-data")
+        .WithName("UploadJob")
+        .WithSummary("Upload a PDF and start extraction")
+        .WithOpenApi();
+
+        // ── GET /jobs/{id}/status ─────────────────────────────────────────────
+        app.MapGet("/jobs/{id}/status", (string id, IJobStore jobStore) =>
+        {
+            var (status, error) = jobStore.Get(id);
+            return Results.Ok(new { jobId = id, status = status.ToString(), error });
+        })
+        .WithName("GetJobStatus")
+        .WithSummary("Poll the status of an extraction job")
+        .WithOpenApi();
+
+        // ── GET /jobs/{id}/result ─────────────────────────────────────────────
+        app.MapGet("/jobs/{id}/result", async (
+            string id,
+            IJobStore jobStore,
+            IBlobStorageService blobStorage,
+            CancellationToken ct) =>
+        {
+            var (status, error) = jobStore.Get(id);
+
+            return status switch
+            {
+                JobStatus.Failed    => Results.Problem(error ?? "Job failed.", statusCode: 500),
+                JobStatus.Completed => await LoadResult(id, blobStorage, ct),
+                _                   => Results.Accepted($"/jobs/{id}/status",
+                                           new { jobId = id, status = status.ToString(), message = "Not yet complete — keep polling /status." })
+            };
+        })
+        .WithName("GetJobResult")
+        .WithSummary("Get the final extraction result (only when Completed)")
+        .WithOpenApi();
+    }
+
+    private static async Task<IResult> LoadResult(
+        string jobId, IBlobStorageService blobStorage, CancellationToken ct)
+    {
+        var result = await blobStorage.LoadJsonAsync<ExtractionJobResult>(jobId, "result.json", ct);
+        return result is null
+            ? Results.NotFound(new { error = "Result blob not found." })
+            : Results.Ok(result);
     }
 }
+
