@@ -6,13 +6,15 @@ public class AgenticExtractionOptions
 
     public string O3DeploymentName { get; set; } = "o3";          // Phases 5,6,7 — reasoning model
     public string O4MiniDeploymentName { get; set; } = "o4-mini"; // Phase 8 — fast + cheap formatting
-    public string Gpt5DeploymentName { get; set; } = "gpt-5";     // Phases 4,9 — schema gen + code gen
+    public string Gpt5DeploymentName { get; set; } = "gpt-5.4";     // Phases 4,9 — schema gen + code gen
     public string AzureOpenAIEndpoint { get; set; } = "";
     public string AzureOpenAIKey { get; set; } = "";              // Prefer managed identity in production
     public string DocumentIntelligenceEndpoint { get; set; } = "";
     public string DocumentIntelligenceKey { get; set; } = "";
     public string BlobConnectionString { get; set; } = "";
     public string BlobContainerName { get; set; } = "agentic-poc-jobs";
+    public string BlobStorageAccountName { get; set; } = "docuflowstorageacc";
+    public string BlobJobsFolderName { get; set; } = "jobs";
     public int MaxFileSizeMb { get; set; } = 50;
     public int MaxOcrPagesPerChunk { get; set; } = 100;
 

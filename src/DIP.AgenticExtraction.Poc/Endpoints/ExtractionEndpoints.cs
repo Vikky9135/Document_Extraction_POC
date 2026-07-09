@@ -1,4 +1,6 @@
+using System.Text.Json;
 using System.Threading.Channels;
+using DIP.AgenticExtraction.Poc.Agents;
 using DIP.AgenticExtraction.Poc.Models;
 using DIP.AgenticExtraction.Poc.Options;
 using DIP.AgenticExtraction.Poc.Services;
@@ -61,6 +63,69 @@ public static class ExtractionEndpoints
             });
         })
         .DisableAntiforgery();  // REST API — no browser form token needed
+
+        // ── POST /schema/generate ─────────────────────────────────────────────
+        // Accepts JSON: { userPrompt: string, documentId: string }
+        // Returns generated schema
+        app.MapPost("/schema/generate", async (
+            [FromBody] SchemaGenerationRequest request,
+            IGenerationAgent generationAgent,
+            IBlobStorageService blobStorage,
+            IOptions<AgenticExtractionOptions> opts,
+            CancellationToken ct) =>
+        {
+            try
+            {
+                if (string.IsNullOrWhiteSpace(request.UserPrompt))
+                    return Results.BadRequest(new { error = "userPrompt is required." });
+
+                if (string.IsNullOrWhiteSpace(request.DocumentId))
+                    return Results.BadRequest(new { error = "documentId is required." });
+
+                // Read OCR content from blob storage
+                var jobsFolder = opts.Value.BlobJobsFolderName;
+                var ocrContextPath = $"{jobsFolder}/{request.DocumentId}/ocr-context.json";
+
+                var extractionSchemaJson = await blobStorage.ReadBlobAsJsonStringAsync(ocrContextPath, ct);
+
+                if (extractionSchemaJson is null)
+                    throw new InvalidOperationException($"OCR context blob not found at: {ocrContextPath}");
+
+                var schemaResponse = await generationAgent.GenerateSchemaAsync(
+                    extractionSchemaJson,
+                    request.UserPrompt,
+                    ct);
+
+                var response = new
+                {
+                    documentId = request.DocumentId,
+                    userPrompt = request.UserPrompt,
+                    schema = schemaResponse
+                };
+
+                return Results.Ok(response);
+            }
+            catch (Exception ex)
+            {
+                var errorCode = ex.GetType().Name;
+                var statusCode = ex switch
+                {
+                    InvalidOperationException => 404,
+                    ArgumentException => 400,
+                    _ => 500
+                };
+
+                return Results.Json(
+                    new
+                    {
+                        error = ex.Message,
+                        errorCode = errorCode,
+                        exceptionType = ex.GetType().FullName,
+                        details = ex.InnerException?.Message
+                    },
+                    statusCode: statusCode);
+            }
+        });
 
         // ── GET /jobs/{id}/status ─────────────────────────────────────────────
         app.MapGet("/jobs/{id}/status", (string id, IJobStore jobStore) =>
