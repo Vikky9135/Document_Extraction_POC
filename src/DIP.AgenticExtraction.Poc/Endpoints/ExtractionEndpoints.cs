@@ -99,3 +99,4 @@ public static class ExtractionEndpoints
             : Results.Ok(result);
     }
 }
+

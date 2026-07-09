@@ -1,6 +1,8 @@
 using System.Threading.Channels;
+using Azure.AI.DocumentIntelligence;
 using DIP.AgenticExtraction.Poc.Endpoints;
 using DIP.AgenticExtraction.Poc.Models;
+using DIP.AgenticExtraction.Poc.Ocr;
 using DIP.AgenticExtraction.Poc.Options;
 using DIP.AgenticExtraction.Poc.Orchestration;
 using DIP.AgenticExtraction.Poc.Services;
