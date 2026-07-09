@@ -1,7 +1,13 @@
-using System.Threading.Channels;
+﻿using System.Threading.Channels;
+using Azure.AI.DocumentIntelligence;
 using DIP.AgenticExtraction.Poc.Endpoints;
 using DIP.AgenticExtraction.Poc.Models;
+using DIP.AgenticExtraction.Poc.Ocr;
 using DIP.AgenticExtraction.Poc.Options;
+using DIP.AgenticExtraction.Poc.Orchestration;
+using DIP.AgenticExtraction.Poc.Schema;
+using DIP.AgenticExtraction.Poc.Services;
+using Scalar.AspNetCore;
 using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -27,27 +33,60 @@ builder.Services.AddSingleton(jobChannel.Writer);
 
 builder.Services.AddHttpClient("default").AddStandardResilienceHandler();
 
-// TODO: register services, agents, orchestrator, and hosted worker as they are implemented.
-// See POC_IMPLEMENTATION_GUIDE.md Step 16 for the full wiring, e.g.:
-//   builder.Services.AddSingleton<IJobStore, JobStore>();
-//   builder.Services.AddSingleton<IBlobStorageService, BlobStorageService>();
-//   builder.Services.AddSingleton<IAzureOpenAIClientFactory, AzureOpenAIClientFactory>();
-//   builder.Services.AddSingleton(new DocumentIntelligenceClient(...));
-//   builder.Services.AddScoped<IOcrPreprocessingService, OcrPreprocessingService>();
-//   builder.Services.AddScoped<ISchemaGenerationService, SchemaGenerationService>();
-//   builder.Services.AddScoped<IExtractionAgent, ExtractionAgent>();
-//   builder.Services.AddScoped<IVerificationAgent, VerificationAgent>();
-//   builder.Services.AddScoped<IFormatterAgent, FormatterAgent>();
-//   builder.Services.AddScoped<IGenerationAgent, GenerationAgent>();
-//   builder.Services.AddScoped<IAgenticExtractionOrchestrator, AgenticExtractionOrchestrator>();
-//   builder.Services.AddHostedService<ExtractionJobProcessor>();
+// ── Step 3 — Storage & Job Store ──────────────────────────────────────────────
+builder.Services.AddSingleton<IJobStore, JobStore>();
+builder.Services.AddSingleton<IBlobStorageService, BlobStorageService>();
+
+// ── Step 5 — Azure Document Intelligence + OCR ────────────────────────────────
+var extractionOpts = builder.Configuration
+    .GetSection(AgenticExtractionOptions.Section)
+    .Get<AgenticExtractionOptions>() ?? new AgenticExtractionOptions();
+
+if (!string.IsNullOrWhiteSpace(extractionOpts.DocumentIntelligenceEndpoint)
+    && !string.IsNullOrWhiteSpace(extractionOpts.DocumentIntelligenceKey))
+{
+    builder.Services.AddSingleton(new DocumentIntelligenceClient(
+        new Uri(extractionOpts.DocumentIntelligenceEndpoint),
+        new Azure.AzureKeyCredential(extractionOpts.DocumentIntelligenceKey)));
+    builder.Services.AddSingleton<IOcrPreprocessingService, OcrPreprocessingService>();
+}
+else
+{
+    Log.Warning("DocumentIntelligenceEndpoint/Key not configured — OCR will not run.");
+}
+
+// ── Step 6 — Azure OpenAI + Schema Generation ──────────────────────────────
+if (!string.IsNullOrWhiteSpace(extractionOpts.AzureOpenAIEndpoint)
+    && !string.IsNullOrWhiteSpace(extractionOpts.AzureOpenAIKey))
+{
+    builder.Services.AddSingleton<IAzureOpenAIClientFactory, AzureOpenAIClientFactory>();
+    // GPT-5 client for Phase 4 (schema gen) and Phase 9 (code gen)
+    builder.Services.AddSingleton(sp =>
+        sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt5Client());
+    builder.Services.AddSingleton<ISchemaGenerationService, SchemaGenerationService>();
+}
+else
+{
+    Log.Warning("AzureOpenAIEndpoint/Key not configured — Schema generation will not run.");
+}
+
+// ── Step 14 — Background worker ──────────────────────────────────────────────
+builder.Services.AddHostedService<ExtractionJobProcessor>();
+
+// ── OpenAPI (Scalar UI) ─────────────────────────────────────────────────────
+builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
 app.UseHttpsRedirection();
 app.UseSerilogRequestLogging();
 
+if (app.Environment.IsDevelopment())
+{
+    app.MapOpenApi();
+    app.MapScalarApiReference();
+}
+
 app.MapExtractionEndpoints();
 
 app.Run();
-
