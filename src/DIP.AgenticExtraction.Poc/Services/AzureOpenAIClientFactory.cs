@@ -18,36 +18,7 @@ public class AzureOpenAIClientFactory : IAzureOpenAIClientFactory
     private readonly AgenticExtractionOptions _opts;
 
     public AzureOpenAIClientFactory(IOptions<AgenticExtractionOptions> opts)
-    {
-        _opts = opts.Value;
-        ValidateConfiguration();
-    }
-
-    private void ValidateConfiguration()
-    {
-        if (string.IsNullOrWhiteSpace(_opts.AzureOpenAIEndpoint))
-        {
-            throw new InvalidOperationException("AzureOpenAIEndpoint is not configured. Check appsettings.Development.json");
-        }
-
-        if (string.IsNullOrWhiteSpace(_opts.AzureOpenAIKey))
-        {
-            throw new InvalidOperationException("AzureOpenAIKey is not configured. Check appsettings.Development.json");
-        }
-
-        if (string.IsNullOrWhiteSpace(_opts.Gpt5DeploymentName) ||
-            string.IsNullOrWhiteSpace(_opts.O3DeploymentName) ||
-            string.IsNullOrWhiteSpace(_opts.O4MiniDeploymentName))
-        {
-            throw new InvalidOperationException("Deployment names are not configured. Check appsettings.Development.json");
-        }
-
-        // Validate endpoint format
-        if (!Uri.TryCreate(_opts.AzureOpenAIEndpoint, UriKind.Absolute, out var endpoint))
-        {
-            throw new InvalidOperationException($"Invalid AzureOpenAIEndpoint format: {_opts.AzureOpenAIEndpoint}");
-        }
-    }
+        => _opts = opts.Value;
 
     public ChatClient CreateO3Client()
         => CreateClient(_opts.O3DeploymentName);
@@ -60,21 +31,11 @@ public class AzureOpenAIClientFactory : IAzureOpenAIClientFactory
 
     private ChatClient CreateClient(string deploymentName)
     {
-        try
-        {
-            var endpoint = new Uri(_opts.AzureOpenAIEndpoint);
+        var endpoint = new Uri(_opts.AzureOpenAIEndpoint);
 
-            // TODO: switch to DefaultAzureCredential when using managed identity.
-            var client = new AzureOpenAIClient(endpoint, new AzureKeyCredential(_opts.AzureOpenAIKey));
+        // TODO: switch to DefaultAzureCredential when using managed identity.
+        var client = new AzureOpenAIClient(endpoint, new AzureKeyCredential(_opts.AzureOpenAIKey));
 
-            return client.GetChatClient(deploymentName);
-        }
-        catch (Exception ex)
-        {
-            var message = $"Failed to create ChatClient for deployment '{deploymentName}'. " +
-                         $"Endpoint: {_opts.AzureOpenAIEndpoint}, " +
-                         $"Error: {ex.Message}";
-            throw new InvalidOperationException(message, ex);
-        }
+        return client.GetChatClient(deploymentName);
     }
 }

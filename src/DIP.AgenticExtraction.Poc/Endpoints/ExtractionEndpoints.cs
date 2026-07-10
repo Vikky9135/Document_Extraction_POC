@@ -1,166 +1,140 @@
-using System.Text.Json;
 using System.Threading.Channels;
-using DIP.AgenticExtraction.Poc.Agents;
 using DIP.AgenticExtraction.Poc.Models;
-using DIP.AgenticExtraction.Poc.Options;
 using DIP.AgenticExtraction.Poc.Services;
 using Microsoft.AspNetCore.Mvc;
-using Microsoft.Extensions.Options;
 
 namespace DIP.AgenticExtraction.Poc.Endpoints;
+
+// DTOs — give Scalar the correct request schemas
+
+/// <summary>Multipart upload: PDF file only.</summary>
+public class UploadJobRequest
+{
+    /// <summary>PDF file to extract data from.</summary>
+    public IFormFile File { get; set; } = null!;
+}
+
+/// <summary>Extraction trigger: natural-language prompt (JSON body).</summary>
+public record ExtractRequest(
+    /// <summary>
+    /// What to extract. Leave blank to auto-discover every field in the document.
+    /// Examples:
+    /// - "Extract vendor name, invoice date, total amount and all line items."
+    /// - "Extract patient name, DOB, diagnosis codes and medications."
+    /// </summary>
+    string? UserPrompt
+);
 
 public static class ExtractionEndpoints
 {
     public static void MapExtractionEndpoints(this WebApplication app)
     {
-        // ── Health ────────────────────────────────────────────────────────────
-        app.MapGet("/health", () => Results.Ok(new { status = "Healthy", utc = DateTime.UtcNow }));
+        // GET /health
+        app.MapGet("/health", () => Results.Ok(new { status = "Healthy", utc = DateTime.UtcNow }))
+           .WithName("Health")
+           .WithSummary("Health check");
 
-        // ── POST /jobs/upload ─────────────────────────────────────────────────
-        // Accepts multipart/form-data: file (PDF) + userPrompt (string)
-        // Returns 202 Accepted with { jobId, status, pollUrl, resultUrl }
+        // POST /jobs/upload  — multipart: PDF file only, no prompt needed
         app.MapPost("/jobs/upload", async (
-            IFormFile file,
-            [FromForm] string userPrompt,
+            HttpContext httpContext,
             IBlobStorageService blobStorage,
             IJobStore jobStore,
-            ChannelWriter<ExtractionJob> queue,
-            IOptions<AgenticExtractionOptions> opts,
             CancellationToken ct) =>
         {
-            // Validate extension
-            if (!file.FileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
-                return Results.BadRequest(new { error = "Only PDF files are accepted." });
+            var form = await httpContext.Request.ReadFormAsync(ct);
 
-            // Validate size
-            var maxBytes = (long)opts.Value.MaxFileSizeMb * 1024 * 1024;
-            if (file.Length > maxBytes)
-                return Results.BadRequest(new { error = $"File exceeds the {opts.Value.MaxFileSizeMb} MB limit." });
+            // Accept "file" field name OR the first file sent (Scalar may use its own name)
+            var file = form.Files.GetFile("file")
+                    ?? form.Files.GetFile("File")
+                    ?? form.Files.FirstOrDefault();
 
-            var jobId = Guid.CreateVersion7().ToString();
+            if (file is null || file.Length == 0)
+                return Results.BadRequest(new { error = "A PDF file is required." });
 
-            // Upload PDF to blob storage
+            if (!file.ContentType.Equals("application/pdf", StringComparison.OrdinalIgnoreCase)
+                && !file.FileName.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                return Results.BadRequest(new { error = "Only PDF files are supported." });
+
+            var jobId = Guid.NewGuid().ToString("N");
+
             await using var stream = file.OpenReadStream();
             await blobStorage.UploadPdfAsync(jobId, stream, ct);
 
-            // Track job status
-            jobStore.Set(jobId, JobStatus.Queued);
+            jobStore.Set(jobId, JobStatus.Uploaded);
 
-            // Enqueue for background processing
-            await queue.WriteAsync(new ExtractionJob
-            {
-                JobId    = jobId,
-                BlobPath = $"jobs/{jobId}/source.pdf",
-                UserPrompt = userPrompt
-            }, ct);
-
-            return Results.Accepted($"/jobs/{jobId}/status", new
-            {
-                jobId,
-                status    = nameof(JobStatus.Queued),
-                pollUrl   = $"/jobs/{jobId}/status",
-                resultUrl = $"/jobs/{jobId}/result"
-            });
+            return Results.Accepted($"/jobs/{jobId}/status", new { jobId });
         })
-        .DisableAntiforgery();  // REST API — no browser form token needed
+        .DisableAntiforgery()
+        .WithName("UploadJob")
+        .WithSummary("Step 1 — Upload a PDF (no prompt needed yet)")
+        .Accepts<UploadJobRequest>("multipart/form-data")
+        .Produces(202)
+        .Produces<ProblemDetails>(400);
 
-        // ── POST /schema/generate ─────────────────────────────────────────────
-        // Accepts JSON: { userPrompt: string, documentId: string }
-        // Returns generated schema
-        app.MapPost("/schema/generate", async (
-            [FromBody] SchemaGenerationRequest request,
-            IGenerationAgent generationAgent,
-            IBlobStorageService blobStorage,
-            IOptions<AgenticExtractionOptions> opts,
+        // POST /jobs/{id}/extract  — JSON body with optional userPrompt, queues the job
+        app.MapPost("/jobs/{id}/extract", async (
+            string id,
+            ExtractRequest body,
+            IJobStore jobStore,
+            ChannelWriter<ExtractionJob> queue,
             CancellationToken ct) =>
         {
-            try
+            var (status, _) = jobStore.Get(id);
+            if (status != JobStatus.Uploaded)
+                return Results.BadRequest(new { error = $"Job must be in 'Uploaded' state before extraction. Current state: {status}." });
+
+            var userPrompt = string.IsNullOrWhiteSpace(body?.UserPrompt)
+                ? "Extract all fields, tables, dates, amounts, names, and identifiers found in this document. Discover every meaningful piece of structured data."
+                : body.UserPrompt;
+
+            var job = new ExtractionJob
             {
-                if (string.IsNullOrWhiteSpace(request.UserPrompt))
-                    return Results.BadRequest(new { error = "userPrompt is required." });
+                JobId      = id,
+                BlobPath   = $"jobs/{id}/source.pdf",
+                UserPrompt = userPrompt
+            };
 
-                if (string.IsNullOrWhiteSpace(request.DocumentId))
-                    return Results.BadRequest(new { error = "documentId is required." });
+            jobStore.Set(id, JobStatus.Queued);
+            await queue.WriteAsync(job, ct);
 
-                // Read OCR content from blob storage
-                var jobsFolder = opts.Value.BlobJobsFolderName;
-                var ocrContextPath = $"{jobsFolder}/{request.DocumentId}/ocr-context.json";
+            return Results.Accepted($"/jobs/{id}/status", new { jobId = id, userPrompt });
+        })
+        .WithName("ExtractJob")
+        .WithSummary("Step 2 — Trigger OCR + schema generation (optional prompt)")
+        .Produces(202)
+        .Produces<ProblemDetails>(400);
 
-                var extractionSchemaJson = await blobStorage.ReadBlobAsJsonStringAsync(ocrContextPath, ct);
-
-                if (extractionSchemaJson is null)
-                    throw new InvalidOperationException($"OCR context blob not found at: {ocrContextPath}");
-
-                var schemaResponse = await generationAgent.GenerateSchemaAsync(
-                    extractionSchemaJson,
-                    request.UserPrompt,
-                    ct);
-
-                var response = new
-                {
-                    documentId = request.DocumentId,
-                    userPrompt = request.UserPrompt,
-                    schema = schemaResponse
-                };
-
-                return Results.Ok(response);
-            }
-            catch (Exception ex)
-            {
-                var errorCode = ex.GetType().Name;
-                var statusCode = ex switch
-                {
-                    InvalidOperationException => 404,
-                    ArgumentException => 400,
-                    _ => 500
-                };
-
-                return Results.Json(
-                    new
-                    {
-                        error = ex.Message,
-                        errorCode = errorCode,
-                        exceptionType = ex.GetType().FullName,
-                        details = ex.InnerException?.Message
-                    },
-                    statusCode: statusCode);
-            }
-        });
-
-        // ── GET /jobs/{id}/status ─────────────────────────────────────────────
-        app.MapGet("/jobs/{id}/status", (string id, IJobStore jobStore) =>
+        // GET /jobs/{id}/status
+        app.MapGet("/jobs/{id}/status", (
+            string id,
+            IJobStore jobStore) =>
         {
             var (status, error) = jobStore.Get(id);
             return Results.Ok(new { jobId = id, status = status.ToString(), error });
-        });
+        })
+        .WithName("GetJobStatus");
 
-        // ── GET /jobs/{id}/result ─────────────────────────────────────────────
+        // GET /jobs/{id}/result
         app.MapGet("/jobs/{id}/result", async (
             string id,
-            IJobStore jobStore,
             IBlobStorageService blobStorage,
+            IJobStore jobStore,
             CancellationToken ct) =>
         {
             var (status, error) = jobStore.Get(id);
 
-            return status switch
-            {
-                JobStatus.Failed    => Results.Problem(error ?? "Job failed.", statusCode: 500),
-                JobStatus.Completed => await LoadResult(id, blobStorage, ct),
-                _                   => Results.Accepted($"/jobs/{id}/status",
-                                           new { jobId = id, status = status.ToString(), message = "Job is not yet complete. Poll /status." })
-            };
-        });
-    }
+            if (status == JobStatus.Failed)
+                return Results.UnprocessableEntity(new { jobId = id, status = status.ToString(), error });
 
-    private static async Task<IResult> LoadResult(
-        string jobId,
-        IBlobStorageService blobStorage,
-        CancellationToken ct)
-    {
-        var result = await blobStorage.LoadJsonAsync<ExtractionJobResult>(jobId, "result.json", ct);
-        return result is null
-            ? Results.NotFound(new { error = "Result blob not found." })
-            : Results.Ok(result);
+            if (status != JobStatus.Completed)
+                return Results.Accepted($"/jobs/{id}/status",
+                    new { jobId = id, status = status.ToString(), message = "Processing — check back shortly." });
+
+            var result = await blobStorage.LoadJsonAsync<ExtractionJobResult>(id, "result.json", ct);
+            return result is null
+                ? Results.NotFound(new { jobId = id, message = "Result file not found in blob storage." })
+                : Results.Ok(result);
+        })
+        .WithName("GetJobResult");
     }
 }
