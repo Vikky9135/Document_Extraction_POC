@@ -33,8 +33,13 @@ public class AzureOpenAIClientFactory : IAzureOpenAIClientFactory
     {
         var endpoint = new Uri(_opts.AzureOpenAIEndpoint);
 
+        // o3 / o4-mini reasoning models require API version 2024-12-01-preview or later.
+        var options = new AzureOpenAIClientOptions(
+            AzureOpenAIClientOptions.ServiceVersion.V2025_03_01_Preview);
+
         // TODO: switch to DefaultAzureCredential when using managed identity.
-        var client = new AzureOpenAIClient(endpoint, new AzureKeyCredential(_opts.AzureOpenAIKey));
+        var client = new AzureOpenAIClient(
+            endpoint, new AzureKeyCredential(_opts.AzureOpenAIKey), options);
 
         return client.GetChatClient(deploymentName);
     }

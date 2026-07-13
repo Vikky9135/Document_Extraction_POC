@@ -1,92 +1,112 @@
-﻿    using System.Threading.Channels;
-    using Azure.AI.DocumentIntelligence;
-    using DIP.AgenticExtraction.Poc.Endpoints;
-    using DIP.AgenticExtraction.Poc.Models;
-    using DIP.AgenticExtraction.Poc.Ocr;
-    using DIP.AgenticExtraction.Poc.Options;
-    using DIP.AgenticExtraction.Poc.Orchestration;
-    using DIP.AgenticExtraction.Poc.Schema;
-    using DIP.AgenticExtraction.Poc.Services;
-    using Scalar.AspNetCore;
-    using Serilog;
+using System.Threading.Channels;
+using Azure.AI.DocumentIntelligence;
+using DIP.AgenticExtraction.Poc.Agents;
+using DIP.AgenticExtraction.Poc.Endpoints;
+using DIP.AgenticExtraction.Poc.Models;
+using DIP.AgenticExtraction.Poc.Ocr;
+using DIP.AgenticExtraction.Poc.Options;
+using DIP.AgenticExtraction.Poc.Orchestration;
+using DIP.AgenticExtraction.Poc.Schema;
+using DIP.AgenticExtraction.Poc.Services;
+using Scalar.AspNetCore;
+using Serilog;
 
-    var builder = WebApplication.CreateBuilder(args);
+var builder = WebApplication.CreateBuilder(args);
 
-    // ── Serilog ──────────────────────────────────────────────────────────────────
-    builder.Host.UseSerilog((ctx, cfg) =>
-        cfg.ReadFrom.Configuration(ctx.Configuration).WriteTo.Console());
+// Serilog
+builder.Host.UseSerilog((ctx, cfg) =>
+    cfg.ReadFrom.Configuration(ctx.Configuration).WriteTo.Console());
 
-    // ── Options ──────────────────────────────────────────────────────────────────
-    builder.Services.Configure<AgenticExtractionOptions>(
-        builder.Configuration.GetSection(AgenticExtractionOptions.Section));
+// Options
+builder.Services.Configure<AgenticExtractionOptions>(
+    builder.Configuration.GetSection(AgenticExtractionOptions.Section));
 
-    // ── Infrastructure ───────────────────────────────────────────────────────────
-    builder.Services.AddMemoryCache();
+// Infrastructure
+builder.Services.AddMemoryCache();
 
-    // ── Job Queue (Channel<T> — bounded, async) ──────────────────────────────────
-    var jobChannel = Channel.CreateBounded<ExtractionJob>(new BoundedChannelOptions(100)
-    {
-        FullMode = BoundedChannelFullMode.Wait
-    });
-    builder.Services.AddSingleton(jobChannel.Reader);
-    builder.Services.AddSingleton(jobChannel.Writer);
+// Job Queue (Channel<T> - bounded, async)
+var jobChannel = Channel.CreateBounded<ExtractionJob>(new BoundedChannelOptions(100)
+{
+    FullMode = BoundedChannelFullMode.Wait
+});
+builder.Services.AddSingleton(jobChannel.Reader);
+builder.Services.AddSingleton(jobChannel.Writer);
 
-    builder.Services.AddHttpClient("default").AddStandardResilienceHandler();
+builder.Services.AddHttpClient("default").AddStandardResilienceHandler();
 
-    // ── Step 3 — Storage & Job Store ──────────────────────────────────────────────
-    builder.Services.AddSingleton<IJobStore, JobStore>();
-    builder.Services.AddSingleton<IBlobStorageService, BlobStorageService>();
+// Step 3 - Storage and Job Store
+builder.Services.AddSingleton<IJobStore, JobStore>();
+builder.Services.AddSingleton<IBlobStorageService, BlobStorageService>();
 
-    // ── Step 5 — Azure Document Intelligence + OCR ────────────────────────────────
-    var extractionOpts = builder.Configuration
-        .GetSection(AgenticExtractionOptions.Section)
-        .Get<AgenticExtractionOptions>() ?? new AgenticExtractionOptions();
+// Step 5 - Azure Document Intelligence + OCR
+var extractionOpts = builder.Configuration
+    .GetSection(AgenticExtractionOptions.Section)
+    .Get<AgenticExtractionOptions>() ?? new AgenticExtractionOptions();
 
-    if (!string.IsNullOrWhiteSpace(extractionOpts.DocumentIntelligenceEndpoint)
-        && !string.IsNullOrWhiteSpace(extractionOpts.DocumentIntelligenceKey))
-    {
-        builder.Services.AddSingleton(new DocumentIntelligenceClient(
-            new Uri(extractionOpts.DocumentIntelligenceEndpoint),
-            new Azure.AzureKeyCredential(extractionOpts.DocumentIntelligenceKey)));
-        builder.Services.AddSingleton<IOcrPreprocessingService, OcrPreprocessingService>();
-    }
-    else
-    {
-        Log.Warning("DocumentIntelligenceEndpoint/Key not configured — OCR will not run.");
-    }
+if (!string.IsNullOrWhiteSpace(extractionOpts.DocumentIntelligenceEndpoint)
+    && !string.IsNullOrWhiteSpace(extractionOpts.DocumentIntelligenceKey))
+{
+    builder.Services.AddSingleton(new DocumentIntelligenceClient(
+        new Uri(extractionOpts.DocumentIntelligenceEndpoint),
+        new Azure.AzureKeyCredential(extractionOpts.DocumentIntelligenceKey)));
+    builder.Services.AddSingleton<IOcrPreprocessingService, OcrPreprocessingService>();
+}
+else
+{
+    Log.Warning("DocumentIntelligenceEndpoint/Key not configured - OCR will not run.");
+}
 
-    // ── Step 6 — Azure OpenAI + Schema Generation ──────────────────────────────
-    if (!string.IsNullOrWhiteSpace(extractionOpts.AzureOpenAIEndpoint)
-        && !string.IsNullOrWhiteSpace(extractionOpts.AzureOpenAIKey))
-    {
-        builder.Services.AddSingleton<IAzureOpenAIClientFactory, AzureOpenAIClientFactory>();
-        // GPT-5 client for Phase 4 (schema gen) and Phase 9 (code gen)
-        builder.Services.AddSingleton(sp =>
-            sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt5Client());
-        builder.Services.AddSingleton<ISchemaGenerationService, SchemaGenerationService>();
-    }
-    else
-    {
-        Log.Warning("AzureOpenAIEndpoint/Key not configured — Schema generation will not run.");
-    }
+// Step 6 - Azure OpenAI + Schema Generation + Agents
+if (!string.IsNullOrWhiteSpace(extractionOpts.AzureOpenAIEndpoint)
+    && !string.IsNullOrWhiteSpace(extractionOpts.AzureOpenAIKey))
+{
+    builder.Services.AddSingleton<IAzureOpenAIClientFactory, AzureOpenAIClientFactory>();
 
-    // ── Step 14 — Background worker ──────────────────────────────────────────────
-    builder.Services.AddHostedService<ExtractionJobProcessor>();
+    // Phase 4 + 9 - GPT-5 (schema gen + code gen)
+    builder.Services.AddSingleton<ISchemaGenerationService>(sp =>
+        new SchemaGenerationService(
+            sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt5Client(),
+            sp.GetRequiredService<ILogger<SchemaGenerationService>>()));
 
-    // ── OpenAPI (Scalar UI) ─────────────────────────────────────────────────────
-    builder.Services.AddOpenApi();
+    // Phase 5-7 - O3 (reasoning)
+    builder.Services.AddSingleton<IExtractionAgent>(sp =>
+        new ExtractionAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateO3Client()));
+    builder.Services.AddSingleton<IVerificationAgent>(sp =>
+        new VerificationAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateO3Client()));
 
-    var app = builder.Build();
+    // Phase 8 - o4-mini (formatting)
+    builder.Services.AddSingleton<IFormatterAgent>(sp =>
+        new FormatterAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateO4MiniClient()));
 
-    app.UseHttpsRedirection();
-    app.UseSerilogRequestLogging();
+    // Phase 9 - GPT-5 code gen + Roslyn execution
+    builder.Services.AddSingleton<IGenerationAgent>(sp =>
+        new GenerationAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt5Client()));
 
-    if (app.Environment.IsDevelopment())
-    {
-        app.MapOpenApi();
-        app.MapScalarApiReference();
-    }
+    // Phases 5-9 orchestrator
+    builder.Services.AddSingleton<IAgenticExtractionOrchestrator, AgenticExtractionOrchestrator>();
+}
+else
+{
+    Log.Warning("AzureOpenAIEndpoint/Key not configured - Schema generation and extraction will not run.");
+}
 
-    app.MapExtractionEndpoints();
+// Step 14 - Background worker
+builder.Services.AddHostedService<ExtractionJobProcessor>();
 
-    app.Run();
+// OpenAPI (Scalar UI)
+builder.Services.AddOpenApi();
+
+var app = builder.Build();
+
+app.UseHttpsRedirection();
+app.UseSerilogRequestLogging();
+
+if (app.Environment.IsDevelopment())
+{
+    app.MapOpenApi();
+    app.MapScalarApiReference();
+}
+
+app.MapExtractionEndpoints();
+
+app.Run();
