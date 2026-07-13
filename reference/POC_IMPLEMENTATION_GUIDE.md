@@ -373,19 +373,40 @@ public record GenerationField
     public string? FieldFormat { get; init; }
 }
 
+// ── Validation schema — mirrors DocuFlow SchemaValidationAgent ───────────────
+// Generated at design-time from the extraction schema + user prompt (Call 4c).
+// Applied after extraction: each rule is checked against the extracted value.
+public enum ValidationSeverity { Warning, Error }
+
+public record ValidationRule
+{
+    public required string FieldName { get; init; }    // camelCase field name to validate
+    public required string Condition { get; init; }    // "must be > 0", "must not be empty"
+    public required string ErrorMessage { get; init; } // shown when rule fails
+    public ValidationSeverity Severity { get; init; } = ValidationSeverity.Error;
+}
+
+// Three schema artifacts — mirrors DocuFlow's three schema agents
 public record ExtractionSchema
 {
+    // Artifact 1 — extraction schema (SchemaAgent / Call 4a)
     public required List<GenericField> Fields { get; init; }
     public required List<TableField> TableFields { get; init; }
+
+    // Artifact 2 — generation schema (SchemaGeneratorAgent / Call 4b)
     public List<GenerationField> GenerationFields { get; init; } = [];
+
+    // Artifact 3 — validation schema (SchemaValidationAgent / Call 4c)
+    public List<ValidationRule> ValidationRules { get; init; } = [];
+
     public ExtractionOptions Options { get; init; } = new();
 }
 
 public record ExtractionOptions
 {
-    public int MaxIter { get; init; } = 2;            // Correction loop iterations
-    public bool IncludeImages { get; init; } = false;  // Vision mode per field
-    public int ConfidenceThreshold { get; init; } = 70; // Min confidence to accept
+    public int MaxIter { get; init; } = 2;               // Correction loop iterations
+    public bool IncludeImages { get; init; } = false;    // Vision mode per field
+    public int ConfidenceThreshold { get; init; } = 70;  // Min confidence to accept
 }
 ```
 
@@ -1014,110 +1035,158 @@ public record DipCoreExtractionFieldDto
 
 ### `Schema/SchemaGenerationService.cs`
 
+Mirrors DocuFlow's three schema agents as three separate GPT-5 calls. Calls 4b and 4c run in parallel via `Task.WhenAll`.
+
 ```csharp
 using System.Text.Json;
-using System.Text.Json.Nodes;
-using OpenAI.Chat;
 using DIP.AgenticExtraction.Poc.Models;
 using DIP.AgenticExtraction.Poc.Prompts;
+using OpenAI.Chat;
 
 namespace DIP.AgenticExtraction.Poc.Schema;
 
 public interface ISchemaGenerationService
 {
     Task<ExtractionSchema> GenerateFromSamplesAsync(
-        IReadOnlyList<string> structuredTexts,
+        string structuredText,
         string userPrompt,
         CancellationToken ct = default);
 }
 
+// Phase 4 — mirrors DocuFlow's three schema agents:
+//   Call 4a  SchemaAgent equivalent           → extraction schema (fields + tableFields)
+//   Call 4b  SchemaGeneratorAgent equivalent  → generation schema (generationFields)
+//   Call 4c  SchemaValidationAgent equivalent → validation rules
+// Calls 4b and 4c depend on Call 4a but run in parallel with each other.
 public class SchemaGenerationService : ISchemaGenerationService
 {
     private readonly ChatClient _gpt5Client;
     private readonly ILogger<SchemaGenerationService> _logger;
-    private int _llmCallCount;
-    public int LlmCallCount => _llmCallCount;
 
     public SchemaGenerationService(ChatClient gpt5Client, ILogger<SchemaGenerationService> logger)
     {
         _gpt5Client = gpt5Client;
-        _logger = logger;
+        _logger     = logger;
     }
 
     public async Task<ExtractionSchema> GenerateFromSamplesAsync(
-        IReadOnlyList<string> structuredTexts,
+        string structuredText,
         string userPrompt,
         CancellationToken ct = default)
     {
-        _logger.LogInformation("Generating schema from {Count} sample documents", structuredTexts.Count);
+        // ── Call 4a: extraction schema (fields + tableFields) ───────────────────────
+        // Inputs: OCR structuredText + userPrompt
+        // System: SchemaGenSystemPrompt
+        _logger.LogInformation("Phase 4a: Generating extraction schema (fields + tables)...");
+        var extractionSchema = await GenerateExtractionSchemaAsync(structuredText, userPrompt, ct);
 
-        // Step 1: Generate a candidate schema per document in parallel (GPT-5)
-        var perDocTasks = structuredTexts.Select(text =>
-            GenerateCandidateSchemaAsync(text, userPrompt, ct));
+        // ── Calls 4b + 4c in parallel ──────────────────────────────────────────
+        // Inputs: schemaSummary (from Call 4a) + userPrompt
+        // OCR text NOT re-sent — schema summary is sufficient context
+        var schemaSummary = BuildSchemaSummary(extractionSchema);
 
-        var candidateSchemas = await Task.WhenAll(perDocTasks);
+        var genTask = GenerateGenerationFieldsAsync(schemaSummary, userPrompt, ct);  // 4b
+        var valTask = GenerateValidationRulesAsync(schemaSummary, userPrompt, ct);   // 4c
+        await Task.WhenAll(genTask, valTask);
 
-        // Step 2: Merge all candidate schemas into one unified schema
-        var mergedSchema = MergeSchemas(candidateSchemas);
-
-        // Step 3: Finalize — add generation fields if user prompt mentions computed values
-        var finalSchema = await FinalizeSchemaAsync(mergedSchema, userPrompt, ct);
-
-        _logger.LogInformation("Schema generation complete. Fields: {F}, Tables: {T}, Generation: {G}",
-            finalSchema.Fields.Count, finalSchema.TableFields.Count, finalSchema.GenerationFields.Count);
-
-        return finalSchema;
+        return extractionSchema with
+        {
+            GenerationFields = genTask.Result,   // Artifact 2
+            ValidationRules  = valTask.Result    // Artifact 3
+        };
     }
 
-    private async Task<ExtractionSchema> GenerateCandidateSchemaAsync(
+    // Call 4a — SchemaAgent equivalent
+    // System prompt: SchemaGenSystemPrompt
+    // "Identify every directly-extractable field and table. Do NOT include computed fields."
+    private async Task<ExtractionSchema> GenerateExtractionSchemaAsync(
         string structuredText, string userPrompt, CancellationToken ct)
     {
-        // Build a strict JSON Schema for the schema output itself
-        var schemaOutputFormat = BuildSchemaOutputFormat();
-
         var messages = new List<ChatMessage>
         {
-            new SystemChatMessage(SystemPrompts.SchemaGeneratorSystemPrompt),
-            new UserChatMessage($"""
-                USER EXTRACTION GOAL:
-                {userPrompt}
-
-                DOCUMENT CONTENT:
-                {structuredText}
-
-                Analyze this document and return the extraction schema for all fields
-                that can be extracted to fulfill the user's goal.
-                """)
+            new SystemChatMessage(SystemPrompts.SchemaGenSystemPrompt),
+            new UserChatMessage(
+                $"User request: {userPrompt}\n\n" +
+                $"Document OCR text:\n{structuredText}")
         };
-
-        Interlocked.Increment(ref _llmCallCount);
         var response = await _gpt5Client.CompleteChatAsync(messages, new ChatCompletionOptions
         {
             ResponseFormat = ChatResponseFormat.CreateJsonSchemaFormat(
-                "candidate_schema",
-                BinaryData.FromString(schemaOutputFormat),
-                jsonSchemaIsStrict: true)
+                "extraction_schema", BinaryData.FromString(ExtractionSchemaJsonSchema), null, true)
         }, ct);
-
-        return ParseCandidateSchema(response.Value.Content[0].Text);
+        return ParseExtractionSchema(response.Value.Content[0].Text);
     }
 
-    private ExtractionSchema MergeSchemas(ExtractionSchema[] schemas)
+    // Call 4b — SchemaGeneratorAgent equivalent
+    // System prompt: SchemaGenGenerationFieldsSystemPrompt
+    // "Only add fields that CANNOT be extracted but CAN be computed from extracted values."
+    private async Task<List<GenerationField>> GenerateGenerationFieldsAsync(
+        string schemaSummary, string userPrompt, CancellationToken ct)
     {
-        var mergedFields = new Dictionary<string, GenericField>(StringComparer.OrdinalIgnoreCase);
-        var mergedTables = new Dictionary<string, TableField>(StringComparer.OrdinalIgnoreCase);
-
-        foreach (var schema in schemas)
+        var messages = new List<ChatMessage>
         {
-            foreach (var field in schema.Fields)
+            new SystemChatMessage(SystemPrompts.SchemaGenGenerationFieldsSystemPrompt),
+            new UserChatMessage(
+                $"User request: {userPrompt}\n\n" +
+                $"Extraction schema from document:\n{schemaSummary}\n\n" +
+                $"Which derived or computed fields should be added?")
+        };
+        var response = await _gpt5Client.CompleteChatAsync(messages, new ChatCompletionOptions
+        {
+            ResponseFormat = ChatResponseFormat.CreateJsonSchemaFormat(
+                "generation_fields", BinaryData.FromString(GenerationFieldsJsonSchema), null, true)
+        }, ct);
+        return ParseGenerationFields(response.Value.Content[0].Text);
+    }
+
+    // Call 4c — SchemaValidationAgent equivalent
+    // System prompt: SchemaValidationSystemPrompt
+    // "Generate business rules applied AFTER extraction. e.g. amount > 0, date in past."
+    private async Task<List<ValidationRule>> GenerateValidationRulesAsync(
+        string schemaSummary, string userPrompt, CancellationToken ct)
+    {
+        var messages = new List<ChatMessage>
+        {
+            new SystemChatMessage(SystemPrompts.SchemaValidationSystemPrompt),
+            new UserChatMessage(
+                $"User request: {userPrompt}\n\n" +
+                $"Extraction schema from document:\n{schemaSummary}")
+        };
+        var response = await _gpt5Client.CompleteChatAsync(messages, new ChatCompletionOptions
+        {
+            ResponseFormat = ChatResponseFormat.CreateJsonSchemaFormat(
+                "validation_rules", BinaryData.FromString(ValidationRulesJsonSchema), null, true)
+        }, ct);
+        return ParseValidationRules(response.Value.Content[0].Text);
+    }
+
+    // Converts Call 4a output into a compact text block for Calls 4b and 4c.
+    // Raw OCR text is NOT forwarded — only field names, types, descriptions, and table columns.
+    private static string BuildSchemaSummary(ExtractionSchema schema)
+    {
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine("Fields:");
+        foreach (var f in schema.Fields)
+            sb.AppendLine($"  - {f.Name} ({f.Type}): {f.Description}");
+        if (schema.TableFields.Count > 0)
+        {
+            sb.AppendLine("Tables:");
+            foreach (var t in schema.TableFields)
             {
-                if (mergedFields.TryGetValue(field.Name, out var existing))
-                {
-                    // Merge synonyms from both
-                    var allSynonyms = existing.Synonyms.Union(field.Synonyms).Distinct().ToList();
-                    mergedFields[field.Name] = existing with { Synonyms = allSynonyms };
-                }
-                else
+                var cols = string.Join(", ", t.SubFields.Select(s => $"{s.Name} ({s.Type})"));
+                sb.AppendLine($"  - {t.Name}: {t.Description} | columns: {cols}");
+            }
+        }
+        return sb.ToString().TrimEnd();
+    }
+
+    // JSON Schemas for strict structured output — additionalProperties:false at every level.
+    // ExtractionSchemaJsonSchema  → Call 4a (fields + tableFields only)
+    // GenerationFieldsJsonSchema  → Call 4b (generationFields only)
+    // ValidationRulesJsonSchema   → Call 4c (validationRules only)
+    // See SchemaGenerationService.cs for the full constant definitions.
+}
+```
                 {
                     mergedFields[field.Name] = field;
                 }
