@@ -183,7 +183,8 @@ This is the **complete capability delta** — what does not exist today in DIP C
 | Capability | DIP Core Today | POC Adds |
 |-----------|---------------|---------|
 | **LLM calls per document** | N calls — 1 per field | 1 call for ALL fields (batched structured output) |
-| **Schema generation from samples** | Manual SQL config only | LLM analyzes sample docs + user prompt → auto-generates field schema |
+| **Schema generation from samples** | Manual SQL config only | LLM analyzes sample docs + user prompt → auto-generates field schema (3-call pattern matching DocuFlow) |
+| **Validation rules (design-time)** | None | SchemaValidationAgent generates business rules (e.g. "amount > 0") applied after extraction — Call 4c |
 | **Structured output enforcement** | Raw string parsing, any shape | `strict: true` JSON Schema — exact types, no hallucinated fields |
 | **Verification** | None — hallucinations pass through | VerificationAgent: independent fact-check, `{correct, feedback}` per field |
 | **Self-correction loop** | None | Re-extract only failed fields with verifier feedback injected |
@@ -238,14 +239,23 @@ sequenceDiagram
     BG->>BG: LayoutElementMapper ConvertLayoutDataToStructuredText
     Note over BG: Structured tagged text ready — same format DIP Core produces
 
-    Note over BG,OAI_5: PHASE 4 — Schema Generation (ALWAYS RUNS)
-    Note over BG,OAI_5: GPT-5 analyzes OCR text and userPrompt to auto-discover all extractable fields
+    Note over BG,OAI_5: PHASE 4 — Schema Generation (ALWAYS RUNS — 3 calls, mirrors DocuFlow)
+    Note over BG,OAI_5: Phase 4a: SchemaAgent — GPT-5 reads OCR text and userPrompt to discover fields and tables
 
-    BG->>OAI_5: Schema generation call with structured tagged text and userPrompt
-    OAI_5-->>BG: Candidate schema per document
-    BG->>OAI_5: Merge and finalize schema call
-    OAI_5-->>BG: Final ExtractionSchema with fields tableFields generationFields
-    BG->>BLOB: Save schema to jobs/jobId/schema.json
+    BG->>OAI_5: Call 4a SchemaAgent — OCR text and userPrompt — fields and tableFields
+    OAI_5-->>BG: ExtractionSchema Artifact 1 fields and tableFields
+
+    Note over BG,OAI_5: Phase 4b and 4c run in parallel — both receive userPrompt and Artifact 1 schema summary
+
+    par Phase 4b
+        BG->>OAI_5: Call 4b SchemaGeneratorAgent — schema summary and userPrompt — generationFields
+        OAI_5-->>BG: ExtractionSchema Artifact 2 generationFields computed values
+    and Phase 4c
+        BG->>OAI_5: Call 4c SchemaValidationAgent — schema summary and userPrompt — validationRules
+        OAI_5-->>BG: ExtractionSchema Artifact 3 validationRules business rules
+    end
+
+    BG->>BLOB: Save merged schema to jobs/jobId/schema.json with fields tableFields generationFields validationRules
 
     Note over BG,OAI_O3: PHASE 5 — Agentic Extraction
 
@@ -333,14 +343,17 @@ flowchart TD
 
 > **This is a new capability that does not exist in DIP Core.** DIP Core requires field schemas to be manually configured in SQL per `ClassTypeID`. The POC adds the ability to **auto-generate the extraction schema** by giving the LLM sample documents and a plain-English description of what to extract.
 
-**How schema generation works in the POC:**
+**How schema generation works in the POC (3-call pattern — mirrors DocuFlow):**
 
-The user uploads a PDF and provides a `userPrompt` describing what they want to extract (e.g. "Extract all invoice fields including vendor, dates, amounts and line items"). The system automatically:
-1. OCRs the document (ADI prebuilt-layout → structured tagged text)
-2. Sends the OCR text + user prompt to GPT-5
-3. GPT-5 discovers all fields, their types, synonyms, and output formats
-4. Generates computation instructions for any derived fields (totals, date differences, etc.)
-5. Returns the complete `ExtractionSchema` used by Phases 5–9
+The user uploads a PDF and provides a `userPrompt` describing what they want to extract (e.g. "Extract all invoice fields including vendor, dates, amounts and line items"). The system automatically runs **3 sequential/parallel GPT-5 calls**:
+
+1. **Call 4a — SchemaAgent** (`SchemaGenSystemPrompt`): receives OCR text + userPrompt → discovers all directly-extractable fields and tables → produces `fields` + `tableFields` (Artifact 1)
+2. **Call 4b — SchemaGeneratorAgent** (`SchemaGenGenerationFieldsSystemPrompt`): receives Artifact 1 schema summary + userPrompt → identifies derived/computed fields → produces `generationFields` (Artifact 2)
+3. **Call 4c — SchemaValidationAgent** (`SchemaValidationSystemPrompt`): receives Artifact 1 schema summary + userPrompt → generates business validation rules → produces `validationRules` (Artifact 3)
+
+Calls 4b and 4c run in **parallel** (`Task.WhenAll`) since both only need Artifact 1 output. The raw OCR text is only sent to Call 4a — Calls 4b/4c receive a compact schema summary instead.
+
+All three artifacts are merged into the final `ExtractionSchema` used by Phases 5–9.
 
 ```mermaid
 flowchart TD
@@ -350,19 +363,29 @@ flowchart TD
         INPUT_OCR["Structured tagged text from Phase 3\nOne or more sample documents"]
         USER_PROMPT["User extraction prompt\ne.g. Extract invoice header fields\nvendor name date total amount\nand all line items"]
 
-        PERFILE["Per-document schema generation\nParallel GPT-5 calls\nEach doc suggests its own candidate fields"]
+        CALL1["Call 4a — SchemaAgent\nGPT-5: OCR text and userPrompt\nDiscovers fields and tableFields\nSystem: SchemaGenSystemPrompt"]
 
-        PERFILE_OUT["Candidate schema per document\nfields name type description synonyms\ntableFields name subFields\ngenerationFields instructions"]
+        CALL1_OUT["Artifact 1 — Extraction Schema\nfields name type description synonyms fieldFormat\ntableFields name subFields"]
 
-        MERGE["merge_schema_fields\nDeduplicate fields by name\nCombine synonyms across docs\nResolve type conflicts"]
+        SUMMARY["BuildSchemaSummary\nConverts Artifact 1 to readable text\nFields with types and descriptions\nTable columns — passed to Calls 4b and 4c"]
 
-        FINALIZE["generate_general_schema\nAdd generationFields computed values\nAdd validationRules business logic checks\nFinalize field_format for each field"]
+        CALL2["Call 4b — SchemaGeneratorAgent\nGPT-5: schema summary and userPrompt\nDiscovers generationFields computed values\nSystem: SchemaGenGenerationFieldsSystemPrompt"]
 
-        SAVE["Save schema to Blob\njobs/jobId/schema.json\nReady for Phase 5 ExtractionAgent"]
+        CALL3["Call 4c — SchemaValidationAgent\nGPT-5: schema summary and userPrompt\nGenerates validationRules business rules\nSystem: SchemaValidationSystemPrompt"]
 
-        INPUT_OCR --> PERFILE
-        USER_PROMPT --> PERFILE
-        PERFILE --> PERFILE_OUT --> MERGE --> FINALIZE --> SAVE
+        PARALLEL["Task.WhenAll\nCalls 4b and 4c run simultaneously\nneither depends on the other"]
+
+        SAVE["Merge all three artifacts\nExtractionSchema fields tableFields generationFields validationRules\nSave to Blob jobs/jobId/schema.json\nReady for Phase 5 ExtractionAgent"]
+
+        INPUT_OCR --> CALL1
+        USER_PROMPT --> CALL1
+        CALL1 --> CALL1_OUT --> SUMMARY
+        SUMMARY --> PARALLEL
+        USER_PROMPT --> PARALLEL
+        PARALLEL --> CALL2
+        PARALLEL --> CALL3
+        CALL2 --> SAVE
+        CALL3 --> SAVE
     end
 
     style PERFILE fill:#f76707,color:#fff
@@ -419,6 +442,26 @@ flowchart TD
       "name": "daysSinceIssue",
       "type": "integer",
       "instructions": "Number of days between invoiceDate and today"
+    }
+  ],
+  "validationRules": [
+    {
+      "fieldName": "totalAmount",
+      "condition": "must be greater than 0",
+      "errorMessage": "Invoice total must be a positive number",
+      "severity": "Error"
+    },
+    {
+      "fieldName": "invoiceDate",
+      "condition": "must be a date in the past or today",
+      "errorMessage": "Invoice date cannot be in the future",
+      "severity": "Warning"
+    },
+    {
+      "fieldName": "vendorName",
+      "condition": "must not be empty",
+      "errorMessage": "Vendor name is required",
+      "severity": "Error"
     }
   ]
 }

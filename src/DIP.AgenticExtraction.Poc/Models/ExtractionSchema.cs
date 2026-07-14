@@ -56,11 +56,45 @@ public record GenerationField
     public string? FieldFormat { get; init; }
 }
 
+// ── Validation schema — mirrors DocuFlow SchemaValidationAgent ───────────────
+// Generated at design-time from the extraction schema + user prompt.
+// Applied after extraction: each rule is checked against the extracted value.
+public enum ValidationSeverity { Warning, Error }
+
+public record ValidationRule
+{
+    // camelCase field name — must match a key in ExtractionSchema.Fields
+    public required string FieldName { get; init; }
+
+    // Natural-language condition, e.g.:
+    //   "must be greater than 0"
+    //   "must not be empty"
+    //   "must be a valid date in the past"
+    //   "must match format YYYY-MM-DD"
+    public required string Condition { get; init; }
+
+    // Message surfaced in ExtractionJobResult when the rule fails
+    public required string ErrorMessage { get; init; }
+
+    public ValidationSeverity Severity { get; init; } = ValidationSeverity.Error;
+}
+
+// ── Three schema artifacts — mirrors DocuFlow's three schema agents ───────────
 public record ExtractionSchema
 {
+    // Artifact 1 — extraction schema (SchemaAgent equivalent)
+    // Fields and tables to pull directly from the document
     public required List<GenericField> Fields { get; init; }
     public required List<TableField> TableFields { get; init; }
+
+    // Artifact 2 — generation schema (SchemaGeneratorAgent equivalent)
+    // Derived/computed fields that are calculated from extracted values, not extracted
     public List<GenerationField> GenerationFields { get; init; } = [];
+
+    // Artifact 3 — validation schema (SchemaValidationAgent equivalent)
+    // Business rules applied to extracted values after extraction completes
+    public List<ValidationRule> ValidationRules { get; init; } = [];
+
     public ExtractionOptions Options { get; init; } = new();
 }
 

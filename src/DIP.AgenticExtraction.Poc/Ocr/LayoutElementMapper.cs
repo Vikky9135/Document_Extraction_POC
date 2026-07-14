@@ -11,80 +11,56 @@ public static class LayoutElementMapper
     public static string ConvertToStructuredText(AnalyzeResult result)
     {
         var sb = new StringBuilder();
-        int globalTableIndex = 0;
+        int pageCount = result.Pages?.Count ?? 0;
 
-        foreach (var page in result.Pages)
+        for (int pageNum = 1; pageNum <= pageCount; pageNum++)
         {
-            int pageNum = page.PageNumber;
             sb.AppendLine($"=== PAGE {pageNum} ===");
 
-            // ── Paragraphs ────────────────────────────────────────────────────
-            var paragraphs = result.Paragraphs?
-                .Where(p => IsOnPage(p.BoundingRegions, pageNum))
+            // ── Paragraphs on this page ──────────────────────────────────────
+            var pageParagraphs = result.Paragraphs?
+                .Where(p => p.BoundingRegions?.Any(r => r.PageNumber == pageNum) == true)
                 .ToList();
 
-            if (paragraphs?.Count > 0)
+            if (pageParagraphs is { Count: > 0 })
             {
                 sb.AppendLine("--- Paragraphs ---");
-                for (int i = 0; i < paragraphs.Count; i++)
+                for (int i = 0; i < pageParagraphs.Count; i++)
                 {
-                    var para = paragraphs[i];
-                    var role = para.Role?.ToString().ToLowerInvariant() ?? "body";
+                    var para = pageParagraphs[i];
+                    var role = para.Role?.ToString() ?? "body";
                     sb.AppendLine($"[para_{i}]({role}): {para.Content}");
                 }
+                sb.AppendLine();
             }
 
-            // ── Tables ────────────────────────────────────────────────────────
-            var tables = result.Tables?
-                .Where(t => IsOnPage(t.BoundingRegions, pageNum))
+            // ── Tables on this page ──────────────────────────────────────────
+            var pageTables = result.Tables?
+                .Where(t => t.BoundingRegions?.Any(r => r.PageNumber == pageNum) == true)
                 .ToList();
 
-            if (tables?.Count > 0)
+            if (pageTables is { Count: > 0 })
             {
                 sb.AppendLine("--- Tables ---");
-                foreach (var table in tables)
+                for (int ti = 0; ti < pageTables.Count; ti++)
                 {
-                    sb.AppendLine($"[table_{globalTableIndex}]: {table.RowCount} rows x {table.ColumnCount} cols");
+                    var table = pageTables[ti];
+                    sb.AppendLine($"[table_{ti}]: {table.RowCount} rows x {table.ColumnCount} cols");
 
-                    for (int row = 0; row < table.RowCount; row++)
+                    for (int r = 0; r < table.RowCount; r++)
                     {
                         var cells = table.Cells
-                            .Where(c => c.RowIndex == row)
+                            .Where(c => c.RowIndex == r)
                             .OrderBy(c => c.ColumnIndex)
-                            .Select(c =>
-                            {
-                                var tag = c.Kind == DocumentTableCellKind.ColumnHeader ? "(header)"
-                                        : c.Kind == DocumentTableCellKind.RowHeader    ? "(rowheader)"
-                                        : "";
-                                return $"[r{row}c{c.ColumnIndex}]{tag}: {c.Content}";
-                            });
+                            .Select(c => c.Content?.Trim() ?? string.Empty);
 
-                        sb.AppendLine("  " + string.Join(" | ", cells));
+                        sb.AppendLine($"  [row_{r}]: {string.Join(" | ", cells)}");
                     }
-
-                    globalTableIndex++;
+                    sb.AppendLine();
                 }
             }
-
-            // ── Selection Marks ───────────────────────────────────────────────
-            if (page.SelectionMarks?.Count > 0)
-            {
-                sb.AppendLine("--- Selection Marks ---");
-                for (int si = 0; si < page.SelectionMarks.Count; si++)
-                {
-                    var mark = page.SelectionMarks[si];
-                    var state = mark.State == DocumentSelectionMarkState.Selected
-                        ? "selected" : "unselected";
-                    sb.AppendLine($"[selmark_{si}]({state})");
-                }
-            }
-
-            sb.AppendLine();
         }
 
         return sb.ToString().TrimEnd();
     }
-
-    private static bool IsOnPage(IReadOnlyList<BoundingRegion>? regions, int pageNumber)
-        => regions?.Any(r => r.PageNumber == pageNumber) ?? false;
 }

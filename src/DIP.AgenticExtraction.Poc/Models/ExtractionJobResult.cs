@@ -1,6 +1,6 @@
 namespace DIP.AgenticExtraction.Poc.Models;
 
-public enum JobStatus { Queued, Processing, Completed, Failed }
+public enum JobStatus { Uploaded, Queued, Processing, Completed, Failed }
 
 public record ExtractionFieldResult
 {

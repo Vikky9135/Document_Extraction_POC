@@ -9,7 +9,7 @@ namespace DIP.AgenticExtraction.Poc.Services;
 public interface IAzureOpenAIClientFactory
 {
     ChatClient CreateO3Client();      // Phases 5,6,7 — reasoning, high accuracy
-    ChatClient CreateO4MiniClient();  // Phase 8 — fast + cheap formatting
+    ChatClient CreateGpt5MiniClient(); // Phase 8 — fast + cheap formatting
     ChatClient CreateGpt5Client();    // Phases 4,9 — schema gen + code gen
 }
 
@@ -23,8 +23,8 @@ public class AzureOpenAIClientFactory : IAzureOpenAIClientFactory
     public ChatClient CreateO3Client()
         => CreateClient(_opts.O3DeploymentName);
 
-    public ChatClient CreateO4MiniClient()
-        => CreateClient(_opts.O4MiniDeploymentName);
+    public ChatClient CreateGpt5MiniClient()
+        => CreateClient(_opts.Gpt5MiniDeploymentName);
 
     public ChatClient CreateGpt5Client()
         => CreateClient(_opts.Gpt5DeploymentName);
@@ -33,8 +33,13 @@ public class AzureOpenAIClientFactory : IAzureOpenAIClientFactory
     {
         var endpoint = new Uri(_opts.AzureOpenAIEndpoint);
 
+        // o3 / gpt-5-mini models require API version 2024-12-01-preview or later.
+        var options = new AzureOpenAIClientOptions(
+            AzureOpenAIClientOptions.ServiceVersion.V2025_03_01_Preview);
+
         // TODO: switch to DefaultAzureCredential when using managed identity.
-        var client = new AzureOpenAIClient(endpoint, new AzureKeyCredential(_opts.AzureOpenAIKey));
+        var client = new AzureOpenAIClient(
+            endpoint, new AzureKeyCredential(_opts.AzureOpenAIKey), options);
 
         return client.GetChatClient(deploymentName);
     }
