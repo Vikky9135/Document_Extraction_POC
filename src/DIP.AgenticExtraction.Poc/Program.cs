@@ -74,9 +74,9 @@ if (!string.IsNullOrWhiteSpace(extractionOpts.AzureOpenAIEndpoint)
     builder.Services.AddSingleton<IVerificationAgent>(sp =>
         new VerificationAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateO3Client()));
 
-    // Phase 8 - o4-mini (formatting)
+    // Phase 8 - gpt-5-mini (formatting)
     builder.Services.AddSingleton<IFormatterAgent>(sp =>
-        new FormatterAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateO4MiniClient()));
+        new FormatterAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt5MiniClient()));
 
     // Phase 9 - GPT-5 code gen + Roslyn execution
     builder.Services.AddSingleton<IGenerationAgent>(sp =>

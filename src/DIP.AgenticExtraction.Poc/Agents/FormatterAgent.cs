@@ -17,12 +17,12 @@ public interface IFormatterAgent
         CancellationToken ct = default);
 }
 
-// Phase 8 — uses o4-mini. Formatting is simple instruction-following, not reasoning.
+// Phase 8 — uses gpt-5-mini. Formatting is simple instruction-following, not reasoning.
 public class FormatterAgent : IFormatterAgent
 {
-    private readonly ChatClient _o4MiniClient;
+    private readonly ChatClient _gpt5MiniClient;
 
-    public FormatterAgent(ChatClient o4MiniClient) => _o4MiniClient = o4MiniClient;
+    public FormatterAgent(ChatClient gpt5MiniClient) => _gpt5MiniClient = gpt5MiniClient;
 
     public async Task<FormatterResult> FormatAsync(
         ExtractionSchema schema,
@@ -61,7 +61,7 @@ public class FormatterAgent : IFormatterAgent
                     "Return ONLY the formatted value as a plain string. No quotes, no explanation.")
             };
 
-            var response = await _o4MiniClient.CompleteChatAsync(messages, cancellationToken: ct);
+            var response = await _gpt5MiniClient.CompleteChatAsync(messages, cancellationToken: ct);
             var formatted = response.Value.Content[0].Text.Trim().Trim('"');
 
             return (field.Name, Result: current with { Value = formatted });
