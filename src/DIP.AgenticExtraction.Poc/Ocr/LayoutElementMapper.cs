@@ -4,8 +4,8 @@ using Azure.AI.DocumentIntelligence;
 namespace DIP.AgenticExtraction.Poc.Ocr;
 
 // Mirrors DIP Core's LayoutElementMapper.ConvertLayoutDataToStructuredText().
-// Output format MUST be IDENTICAL to DIP Core — same tags, structure, page numbering —
-// so OCR text fed to the agents is byte-for-byte compatible with DIP Core production.
+// Output format is IDENTICAL — same tags, structure, page numbering — so the text
+// fed to agents is compatible with DIP Core production.
 public static class LayoutElementMapper
 {
     public static string ConvertToStructuredText(AnalyzeResult result)

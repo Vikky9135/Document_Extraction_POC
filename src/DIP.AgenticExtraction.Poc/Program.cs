@@ -98,14 +98,14 @@ builder.Services.AddOpenApi();
 
 var app = builder.Build();
 
-app.UseHttpsRedirection();
-app.UseSerilogRequestLogging();
-
 if (app.Environment.IsDevelopment())
 {
-    app.MapOpenApi();
-    app.MapScalarApiReference();
+    app.MapOpenApi();                   // /openapi/v1.json
+    app.MapScalarApiReference();        // /scalar/v1  ← open this in browser
 }
+
+app.UseHttpsRedirection();
+app.UseSerilogRequestLogging();
 
 app.MapExtractionEndpoints();
 

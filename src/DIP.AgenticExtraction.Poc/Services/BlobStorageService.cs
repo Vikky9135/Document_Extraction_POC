@@ -25,6 +25,9 @@ public class BlobStorageService : IBlobStorageService
         var o = opts.Value;
         var serviceClient = new BlobServiceClient(o.BlobConnectionString);
         _container = serviceClient.GetBlobContainerClient(o.BlobContainerName);
+
+        // Auto-create the container if it does not exist — no manual portal step needed.
+        _container.CreateIfNotExists();
     }
 
     public async Task UploadPdfAsync(string jobId, Stream pdfStream, CancellationToken ct = default)

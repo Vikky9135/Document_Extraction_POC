@@ -127,12 +127,14 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
         totalLlmCalls += formatted.FormatterCallCount;
 
         // ── PHASE 9: Generation Fields ────────────────────────────────────────
+        // Use pre-formatted fields for computation — formatted values may contain
+        // locale symbols (commas, currency) that break numeric parsing in Roslyn.
         Dictionary<string, object?> generatedFields = [];
         if (schema.GenerationFields.Count > 0)
         {
             _logger.LogInformation("[{JobId}] Phase 9: Computing {Count} generation fields",
                 jobId, schema.GenerationFields.Count);
-            var genResult = await _generationAgent.ComputeAsync(schema, formatted.Fields, ct);
+            var genResult = await _generationAgent.ComputeAsync(schema, fields, ct);
             generatedFields = genResult.Results;
             totalLlmCalls += genResult.LlmCallCount;
         }

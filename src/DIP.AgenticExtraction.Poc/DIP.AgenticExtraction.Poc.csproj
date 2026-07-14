@@ -4,6 +4,9 @@
     <TargetFramework>net10.0</TargetFramework>
     <Nullable>enable</Nullable>
     <ImplicitUsings>enable</ImplicitUsings>
+    <!-- NU1903: Microsoft.OpenApi ReDoS advisory only affects untrusted doc parsing.
+         This POC generates OpenAPI docs; it never parses external ones. Safe to suppress. -->
+    <NoWarn>$(NoWarn);NU1903</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>

@@ -15,13 +15,16 @@ public class OcrPreprocessingService : IOcrPreprocessingService
 {
     private readonly DocumentIntelligenceClient _client;
     private readonly AgenticExtractionOptions _opts;
+    private readonly ILogger<OcrPreprocessingService> _logger;
 
     public OcrPreprocessingService(
         DocumentIntelligenceClient client,
-        IOptions<AgenticExtractionOptions> opts)
+        IOptions<AgenticExtractionOptions> opts,
+        ILogger<OcrPreprocessingService> logger)
     {
         _client = client;
         _opts   = opts.Value;
+        _logger = logger;
     }
 
     public async Task<OcrContext> PrepareAsync(Stream pdfStream, CancellationToken ct = default)
