@@ -83,7 +83,14 @@ if (!string.IsNullOrWhiteSpace(extractionOpts.AzureOpenAIEndpoint)
         new GenerationAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt5Client()));
 
     // Phases 5-9 orchestrator
-    builder.Services.AddSingleton<IAgenticExtractionOrchestrator, AgenticExtractionOrchestrator>();
+    builder.Services.AddSingleton<IAgenticExtractionOrchestrator>(sp =>
+        new AgenticExtractionOrchestrator(
+            sp.GetRequiredService<IExtractionAgent>(),
+            sp.GetRequiredService<IVerificationAgent>(),
+            sp.GetRequiredService<IFormatterAgent>(),
+            sp.GetRequiredService<IGenerationAgent>(),
+            sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt5MiniClient(),
+            sp.GetRequiredService<ILogger<AgenticExtractionOrchestrator>>()));
 }
 else
 {

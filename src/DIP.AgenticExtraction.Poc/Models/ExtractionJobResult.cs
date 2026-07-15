@@ -14,6 +14,7 @@ public record ExtractionJobResult
 {
     public required string JobId { get; init; }
     public JobStatus Status { get; init; }
+    public Dictionary<string, object?> RequestedFields { get; init; } = [];
     public Dictionary<string, ExtractionFieldResult> Fields { get; init; } = [];
     public Dictionary<string, List<Dictionary<string, object?>>> TableFields { get; init; } = [];
     public Dictionary<string, object?> GeneratedFields { get; init; } = [];

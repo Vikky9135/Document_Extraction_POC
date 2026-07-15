@@ -113,7 +113,7 @@ public class ExtractionJobProcessor : BackgroundService
             job.JobId);
 
         var result = await _orchestrator.RunAsync(
-            job.JobId, schema, ocrContext.StructuredText, ocrContext.PageCount, ct);
+            job.JobId, schema, ocrContext.StructuredText, job.UserPrompt, ocrContext.PageCount, ct);
 
         var finalResult = result with
         {

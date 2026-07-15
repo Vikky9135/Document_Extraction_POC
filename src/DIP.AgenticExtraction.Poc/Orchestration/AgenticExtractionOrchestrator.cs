@@ -1,5 +1,7 @@
+using System.Text.Json;
 using DIP.AgenticExtraction.Poc.Agents;
 using DIP.AgenticExtraction.Poc.Models;
+using OpenAI.Chat;
 
 namespace DIP.AgenticExtraction.Poc.Orchestration;
 
@@ -10,6 +12,7 @@ public interface IAgenticExtractionOrchestrator
         string jobId,
         ExtractionSchema schema,
         string structuredText,
+        string userPrompt,
         int ocrPageCount,
         CancellationToken ct = default);
 }
@@ -20,6 +23,7 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
     private readonly IVerificationAgent _verificationAgent;
     private readonly IFormatterAgent _formatterAgent;
     private readonly IGenerationAgent _generationAgent;
+    private readonly ChatClient _gpt5MiniClient;
     private readonly ILogger<AgenticExtractionOrchestrator> _logger;
 
     public AgenticExtractionOrchestrator(
@@ -27,12 +31,14 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
         IVerificationAgent verificationAgent,
         IFormatterAgent formatterAgent,
         IGenerationAgent generationAgent,
+        ChatClient gpt5MiniClient,
         ILogger<AgenticExtractionOrchestrator> logger)
     {
         _extractionAgent   = extractionAgent;
         _verificationAgent = verificationAgent;
         _formatterAgent    = formatterAgent;
         _generationAgent   = generationAgent;
+        _gpt5MiniClient    = gpt5MiniClient;
         _logger            = logger;
     }
 
@@ -40,6 +46,7 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
         string jobId,
         ExtractionSchema schema,
         string structuredText,
+        string userPrompt,
         int ocrPageCount,
         CancellationToken ct = default)
     {
@@ -143,10 +150,18 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
         _logger.LogInformation("[{JobId}] Pipeline complete. LLM calls: {Calls}, Iterations: {Iter}, Time: {Ms}ms",
             jobId, totalLlmCalls, correctionIterations, sw.ElapsedMilliseconds);
 
+        // ── Resolve Requested Fields ──────────────────────────────────────────
+        // Map the user's prompt to the relevant field names from both extracted
+        // and generated fields so the caller can see exactly what they asked for.
+        var requestedFields = await ResolveRequestedFieldsAsync(
+            userPrompt, formatted.Fields, generatedFields, ct);
+        totalLlmCalls++;
+
         return new ExtractionJobResult
         {
             JobId           = jobId,
             Status          = JobStatus.Completed,
+            RequestedFields = requestedFields,
             Fields          = formatted.Fields,
             TableFields     = tables,
             GeneratedFields = generatedFields,
@@ -158,5 +173,59 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
                 OcrPageCount         = ocrPageCount
             }
         };
+    }
+
+    /// <summary>
+    /// Uses a lightweight LLM call to identify which fields from the full result
+    /// correspond to what the user explicitly asked for in their prompt.
+    /// </summary>
+    private async Task<Dictionary<string, object?>> ResolveRequestedFieldsAsync(
+        string userPrompt,
+        IReadOnlyDictionary<string, ExtractionFieldResult> fields,
+        Dictionary<string, object?> generatedFields,
+        CancellationToken ct)
+    {
+        // Build a combined list of all available field names
+        var allFieldNames = fields.Keys
+            .Concat(generatedFields.Keys)
+            .ToList();
+
+        var messages = new List<ChatMessage>
+        {
+            new SystemChatMessage("""
+                You are a field matcher. Given a user's extraction request and a list of
+                available field names, return ONLY the field names that directly answer
+                what the user asked for. Do NOT include auto-discovered fields that the
+                user did not request.
+
+                Return a JSON array of field name strings. No explanation, no markdown.
+                Example: ["returnToInvoiceAmount","totalPremiumWithoutNCB"]
+                """),
+            new UserChatMessage(
+                $"User request: {userPrompt}\n\n" +
+                $"Available field names:\n{JsonSerializer.Serialize(allFieldNames)}")
+        };
+
+        try
+        {
+            var response = await _gpt5MiniClient.CompleteChatAsync(messages, cancellationToken: ct);
+            var raw = response.Value.Content[0].Text.Trim();
+            var matchedNames = JsonSerializer.Deserialize<List<string>>(raw) ?? [];
+
+            var result = new Dictionary<string, object?>();
+            foreach (var name in matchedNames)
+            {
+                if (fields.TryGetValue(name, out var field))
+                    result[name] = field.Value;
+                else if (generatedFields.TryGetValue(name, out var genValue))
+                    result[name] = genValue;
+            }
+            return result;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Failed to resolve requested fields — returning empty.");
+            return [];
+        }
     }
 }
