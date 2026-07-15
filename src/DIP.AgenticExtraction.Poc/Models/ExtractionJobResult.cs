@@ -10,11 +10,19 @@ public record ExtractionFieldResult
     public string RawStr { get; init; } = "";   // Exact string as it appeared in document
 }
 
+public record RequestedFieldResult
+{
+    public object? Value { get; init; }
+    public int? Confidence { get; init; }       // null for generated fields
+    public bool IsVerified { get; init; }
+    public string Source { get; init; } = "";   // "extracted" or "generated"
+}
+
 public record ExtractionJobResult
 {
     public required string JobId { get; init; }
     public JobStatus Status { get; init; }
-    public Dictionary<string, object?> RequestedFields { get; init; } = [];
+    public Dictionary<string, RequestedFieldResult> RequestedFields { get; init; } = [];
     public Dictionary<string, ExtractionFieldResult> Fields { get; init; } = [];
     public Dictionary<string, List<Dictionary<string, object?>>> TableFields { get; init; } = [];
     public Dictionary<string, object?> GeneratedFields { get; init; } = [];

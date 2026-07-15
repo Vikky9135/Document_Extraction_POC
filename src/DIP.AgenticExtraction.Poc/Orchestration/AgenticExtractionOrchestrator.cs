@@ -179,7 +179,7 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
     /// Uses a lightweight LLM call to identify which fields from the full result
     /// correspond to what the user explicitly asked for in their prompt.
     /// </summary>
-    private async Task<Dictionary<string, object?>> ResolveRequestedFieldsAsync(
+    private async Task<Dictionary<string, RequestedFieldResult>> ResolveRequestedFieldsAsync(
         string userPrompt,
         IReadOnlyDictionary<string, ExtractionFieldResult> fields,
         Dictionary<string, object?> generatedFields,
@@ -212,13 +212,29 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
             var raw = response.Value.Content[0].Text.Trim();
             var matchedNames = JsonSerializer.Deserialize<List<string>>(raw) ?? [];
 
-            var result = new Dictionary<string, object?>();
+            var result = new Dictionary<string, RequestedFieldResult>();
             foreach (var name in matchedNames)
             {
                 if (fields.TryGetValue(name, out var field))
-                    result[name] = field.Value;
+                {
+                    result[name] = new RequestedFieldResult
+                    {
+                        Value      = field.Value,
+                        Confidence = field.Confidence,
+                        IsVerified = field.IsVerified,
+                        Source     = "extracted"
+                    };
+                }
                 else if (generatedFields.TryGetValue(name, out var genValue))
-                    result[name] = genValue;
+                {
+                    result[name] = new RequestedFieldResult
+                    {
+                        Value      = genValue,
+                        Confidence = null,
+                        IsVerified = false,
+                        Source     = "generated"
+                    };
+                }
             }
             return result;
         }
