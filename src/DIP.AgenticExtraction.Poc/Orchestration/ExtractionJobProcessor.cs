@@ -1,17 +1,22 @@
 using System.Threading.Channels;
 using DIP.AgenticExtraction.Poc.Models;
-using DIP.AgenticExtraction.Poc.Ocr;
 using DIP.AgenticExtraction.Poc.Schema;
 using DIP.AgenticExtraction.Poc.Services;
 
 namespace DIP.AgenticExtraction.Poc.Orchestration;
+
+// DTO to deserialise the OCR context stored in blob during upload.
+internal record OcrContextDto
+{
+    public int PageCount { get; init; }
+    public string StructuredText { get; init; } = "";
+}
 
 public class ExtractionJobProcessor : BackgroundService
 {
     private readonly ChannelReader<ExtractionJob> _queue;
     private readonly IBlobStorageService _blobStorage;
     private readonly IJobStore _jobStore;
-    private readonly IOcrPreprocessingService? _ocrService;
     private readonly ISchemaGenerationService? _schemaService;
     private readonly IAgenticExtractionOrchestrator? _orchestrator;
     private readonly ILogger<ExtractionJobProcessor> _logger;
@@ -26,7 +31,6 @@ public class ExtractionJobProcessor : BackgroundService
         _queue         = queue;
         _blobStorage   = blobStorage;
         _jobStore      = jobStore;
-        _ocrService    = services.GetService<IOcrPreprocessingService>();
         _schemaService = services.GetService<ISchemaGenerationService>();
         _orchestrator  = services.GetService<IAgenticExtractionOrchestrator>();
         _logger        = logger;
@@ -56,29 +60,19 @@ public class ExtractionJobProcessor : BackgroundService
 
     private async Task ProcessJobAsync(ExtractionJob job, CancellationToken ct)
     {
-        // ── Phase 3 — OCR ────────────────────────────────────────────────────
-        if (_ocrService is null)
+        // ── Load OCR context from blob (already processed during upload) ─────
+        _logger.LogInformation("[Job {JobId}] Loading OCR context from blob...", job.JobId);
+        var ocrData = await _blobStorage.LoadJsonAsync<OcrContextDto>(job.JobId, "ocr-context.json", ct);
+
+        if (ocrData is null || string.IsNullOrWhiteSpace(ocrData.StructuredText))
         {
-            _logger.LogWarning("[Job {JobId}] Skipping OCR — DocumentIntelligence not configured.", job.JobId);
-            _jobStore.Set(job.JobId, JobStatus.Failed, "OCR service not configured.");
+            _jobStore.Set(job.JobId, JobStatus.Failed, "OCR context not found in blob. Was the PDF uploaded correctly?");
             return;
         }
 
-        _logger.LogInformation("[Job {JobId}] Phase 3: Downloading PDF...", job.JobId);
-        await using var pdfStream = await _blobStorage.DownloadPdfAsync(job.JobId, ct);
-
-        _logger.LogInformation("[Job {JobId}] Phase 3: Running OCR...", job.JobId);
-        var ocrContext = await _ocrService.PrepareAsync(pdfStream, ct);
-
-        await _blobStorage.SaveJsonAsync(job.JobId, "ocr-context.json", new
-        {
-            pageCount      = ocrContext.PageCount,
-            structuredText = ocrContext.StructuredText
-        }, ct);
-
         _logger.LogInformation(
-            "[Job {JobId}] Phase 3 complete. Pages={Pages}, TextLength={Len}",
-            job.JobId, ocrContext.PageCount, ocrContext.StructuredText.Length);
+            "[Job {JobId}] OCR loaded. Pages={Pages}, TextLength={Len}",
+            job.JobId, ocrData.PageCount, ocrData.StructuredText.Length);
 
         // ── Phase 4 — Schema Generation ───────────────────────────────────────
         if (_schemaService is null)
@@ -90,7 +84,7 @@ public class ExtractionJobProcessor : BackgroundService
 
         _logger.LogInformation("[Job {JobId}] Phase 4: Generating schema...", job.JobId);
         var schema = await _schemaService.GenerateFromSamplesAsync(
-            ocrContext.StructuredText, job.UserPrompt, ct);
+            ocrData.StructuredText, job.UserPrompt, ct);
 
         await _blobStorage.SaveJsonAsync(job.JobId, "schema.json", schema, ct);
 
@@ -113,7 +107,7 @@ public class ExtractionJobProcessor : BackgroundService
             job.JobId);
 
         var result = await _orchestrator.RunAsync(
-            job.JobId, schema, ocrContext.StructuredText, job.UserPrompt, ocrContext.PageCount, ct);
+            job.JobId, schema, ocrData.StructuredText, job.UserPrompt, ocrData.PageCount, ct);
 
         var finalResult = result with
         {

@@ -1,5 +1,6 @@
 using System.Threading.Channels;
 using DIP.AgenticExtraction.Poc.Models;
+using DIP.AgenticExtraction.Poc.Ocr;
 using DIP.AgenticExtraction.Poc.Services;
 using Microsoft.AspNetCore.Mvc;
 
@@ -39,6 +40,7 @@ public static class ExtractionEndpoints
             HttpContext httpContext,
             IBlobStorageService blobStorage,
             IJobStore jobStore,
+            IOcrPreprocessingService ocrService,
             CancellationToken ct) =>
         {
             var form = await httpContext.Request.ReadFormAsync(ct);
@@ -57,16 +59,32 @@ public static class ExtractionEndpoints
 
             var jobId = Guid.NewGuid().ToString("N");
 
+            // Store the source PDF
             await using var stream = file.OpenReadStream();
             await blobStorage.UploadPdfAsync(jobId, stream, ct);
 
+            // Run OCR immediately during upload
+            stream.Position = 0;
+            var ocrContext = await ocrService.PrepareAsync(stream, ct);
+
+            await blobStorage.SaveJsonAsync(jobId, "ocr-context.json", new
+            {
+                pageCount      = ocrContext.PageCount,
+                structuredText = ocrContext.StructuredText
+            }, ct);
+
             jobStore.Set(jobId, JobStatus.Uploaded);
 
-            return Results.Accepted($"/jobs/{jobId}/status", new { jobId });
+            return Results.Accepted($"/jobs/{jobId}/status", new
+            {
+                jobId,
+                ocrPageCount = ocrContext.PageCount,
+                ocrTextLength = ocrContext.StructuredText.Length
+            });
         })
         .DisableAntiforgery()
         .WithName("UploadJob")
-        .WithSummary("Step 1 — Upload a PDF (no prompt needed yet)")
+        .WithSummary("Step 1 — Upload a PDF, runs OCR immediately")
         .Accepts<UploadJobRequest>("multipart/form-data")
         .Produces(202)
         .Produces<ProblemDetails>(400);
@@ -100,7 +118,7 @@ public static class ExtractionEndpoints
             return Results.Accepted($"/jobs/{id}/status", new { jobId = id, userPrompt });
         })
         .WithName("ExtractJob")
-        .WithSummary("Step 2 — Trigger OCR + schema generation (optional prompt)")
+        .WithSummary("Step 2 — Trigger schema generation + extraction (optional prompt)")
         .Produces(202)
         .Produces<ProblemDetails>(400);
 
