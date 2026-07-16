@@ -198,12 +198,15 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
                 what the user asked for. Do NOT include auto-discovered fields that the
                 user did not request.
 
+                CRITICAL: You MUST return field names EXACTLY as they appear in the provided list.
+                Do NOT modify, rename, or invent field names. Copy them character-for-character.
+
                 Return a JSON array of field name strings. No explanation, no markdown.
-                Example: ["returnToInvoiceAmount","totalPremiumWithoutNCB"]
+                Example: ["returnToInvoiceAmount","totalPremiumCollectedWithoutNcb"]
                 """),
             new UserChatMessage(
                 $"User request: {userPrompt}\n\n" +
-                $"Available field names:\n{JsonSerializer.Serialize(allFieldNames)}")
+                $"Available field names (use EXACTLY these strings):\n{JsonSerializer.Serialize(allFieldNames)}")
         };
 
         try
@@ -212,24 +215,28 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
             var raw = response.Value.Content[0].Text.Trim();
             var matchedNames = JsonSerializer.Deserialize<List<string>>(raw) ?? [];
 
+            // Build case-insensitive lookup maps for resilience against LLM casing drift
+            var fieldLookup = fields.ToDictionary(kvp => kvp.Key, kvp => kvp, StringComparer.OrdinalIgnoreCase);
+            var genLookup = generatedFields.ToDictionary(kvp => kvp.Key, kvp => kvp, StringComparer.OrdinalIgnoreCase);
+
             var result = new Dictionary<string, RequestedFieldResult>();
             foreach (var name in matchedNames)
             {
-                if (fields.TryGetValue(name, out var field))
+                if (fieldLookup.TryGetValue(name, out var fieldKvp))
                 {
-                    result[name] = new RequestedFieldResult
+                    result[fieldKvp.Key] = new RequestedFieldResult
                     {
-                        Value      = field.Value,
-                        Confidence = field.Confidence,
-                        IsVerified = field.IsVerified,
+                        Value      = fieldKvp.Value.Value,
+                        Confidence = fieldKvp.Value.Confidence,
+                        IsVerified = fieldKvp.Value.IsVerified,
                         Source     = "extracted"
                     };
                 }
-                else if (generatedFields.TryGetValue(name, out var genValue))
+                else if (genLookup.TryGetValue(name, out var genKvp))
                 {
-                    result[name] = new RequestedFieldResult
+                    result[genKvp.Key] = new RequestedFieldResult
                     {
-                        Value      = genValue,
+                        Value      = genKvp.Value,
                         Confidence = null,
                         IsVerified = false,
                         Source     = "generated"
