@@ -4,6 +4,13 @@ namespace DIP.AgenticExtraction.Poc.Models;
 
 public enum FieldType { String, Number, Date, Integer, Time, Boolean }
 
+/// <summary>
+/// Role of a field in the extraction schema.
+/// "Extract" = directly requested by the user.
+/// "Source" = present in the document, included only because it is needed to compute a generationField.
+/// </summary>
+public enum FieldRole { Extract, Source }
+
 public record GenericField
 {
     public required string Name { get; init; }
@@ -12,6 +19,7 @@ public record GenericField
     public List<string> Synonyms { get; init; } = [];
     public string? FieldFormat { get; init; }       // "YYYY-MM-DD", "2dp", "UPPERCASE"
     public bool UseVisionExtraction { get; init; }  // Use page images for this field
+    public FieldRole Role { get; init; } = FieldRole.Extract;  // "extract" or "source"
 
     // Returns description + synonyms string — used in JSON Schema "description" field.
     // On re-extraction pass, feedbackText is appended here.

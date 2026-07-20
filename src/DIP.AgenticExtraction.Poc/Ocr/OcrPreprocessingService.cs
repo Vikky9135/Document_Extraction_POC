@@ -41,11 +41,91 @@ public class OcrPreprocessingService : IOcrPreprocessingService
 
         var result = operation.Value;
 
+        // Extract word-level and line-level elements with polygon coordinates
+        var words = ExtractWords(result);
+        var lines = ExtractLines(result);
+
         return new OcrContext
         {
             StructuredText   = LayoutElementMapper.ConvertToStructuredText(result),
             RawAnalyzeResult = result,
-            PageCount        = result.Pages?.Count ?? 0
+            PageCount        = result.Pages?.Count ?? 0,
+            Words            = words,
+            Lines            = lines
         };
+    }
+
+    /// <summary>
+    /// Extracts word-level elements with their bounding polygons from ADI result.
+    /// Polygons are normalized (0-1) relative to page dimensions.
+    /// </summary>
+    private static List<OcrWord> ExtractWords(AnalyzeResult result)
+    {
+        var words = new List<OcrWord>();
+        if (result.Pages is null) return words;
+
+        foreach (var page in result.Pages)
+        {
+            var pageWidth = page.Width ?? 1;
+            var pageHeight = page.Height ?? 1;
+
+            if (page.Words is null) continue;
+            foreach (var word in page.Words)
+            {
+                words.Add(new OcrWord
+                {
+                    Content    = word.Content,
+                    PageNumber = page.PageNumber,
+                    Confidence = word.Confidence,
+                    Polygon    = NormalizePolygon(word.Polygon, pageWidth, pageHeight)
+                });
+            }
+        }
+        return words;
+    }
+
+    /// <summary>
+    /// Extracts line-level elements with their bounding polygons from ADI result.
+    /// </summary>
+    private static List<OcrLine> ExtractLines(AnalyzeResult result)
+    {
+        var lines = new List<OcrLine>();
+        if (result.Pages is null) return lines;
+
+        foreach (var page in result.Pages)
+        {
+            var pageWidth = page.Width ?? 1;
+            var pageHeight = page.Height ?? 1;
+
+            if (page.Lines is null) continue;
+            foreach (var line in page.Lines)
+            {
+                lines.Add(new OcrLine
+                {
+                    Content    = line.Content,
+                    PageNumber = page.PageNumber,
+                    Polygon    = NormalizePolygon(line.Polygon, pageWidth, pageHeight)
+                });
+            }
+        }
+        return lines;
+    }
+
+    /// <summary>
+    /// Converts ADI polygon (flat list of x,y pairs in page units) to normalized PolygonPoints.
+    /// </summary>
+    private static List<PolygonPoint> NormalizePolygon(IReadOnlyList<float>? polygon, float pageWidth, float pageHeight)
+    {
+        if (polygon is null || polygon.Count < 2) return [];
+
+        var points = new List<PolygonPoint>();
+        for (int i = 0; i < polygon.Count - 1; i += 2)
+        {
+            points.Add(new PolygonPoint(
+                X: Math.Round(polygon[i] / pageWidth, 6),
+                Y: Math.Round(polygon[i + 1] / pageHeight, 6)
+            ));
+        }
+        return points;
     }
 }

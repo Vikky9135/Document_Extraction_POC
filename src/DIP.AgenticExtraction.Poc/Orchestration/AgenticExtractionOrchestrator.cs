@@ -1,6 +1,7 @@
 using System.Text.Json;
 using DIP.AgenticExtraction.Poc.Agents;
 using DIP.AgenticExtraction.Poc.Models;
+using DIP.AgenticExtraction.Poc.Ocr;
 using OpenAI.Chat;
 
 namespace DIP.AgenticExtraction.Poc.Orchestration;
@@ -14,6 +15,8 @@ public interface IAgenticExtractionOrchestrator
         string structuredText,
         string userPrompt,
         int ocrPageCount,
+        IReadOnlyList<OcrLine> ocrLines,
+        IReadOnlyList<OcrWord> ocrWords,
         CancellationToken ct = default);
 }
 
@@ -48,6 +51,8 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
         string structuredText,
         string userPrompt,
         int ocrPageCount,
+        IReadOnlyList<OcrLine> ocrLines,
+        IReadOnlyList<OcrWord> ocrWords,
         CancellationToken ct = default)
     {
         var sw = System.Diagnostics.Stopwatch.StartNew();
@@ -137,12 +142,14 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
         // Use pre-formatted fields for computation — formatted values may contain
         // locale symbols (commas, currency) that break numeric parsing in Roslyn.
         Dictionary<string, object?> generatedFields = [];
+        Dictionary<string, string> generationScripts = [];
         if (schema.GenerationFields.Count > 0)
         {
             _logger.LogInformation("[{JobId}] Phase 9: Computing {Count} generation fields",
                 jobId, schema.GenerationFields.Count);
             var genResult = await _generationAgent.ComputeAsync(schema, fields, ct);
             generatedFields = genResult.Results;
+            generationScripts = genResult.GeneratedScripts;
             totalLlmCalls += genResult.LlmCallCount;
         }
 
@@ -150,22 +157,27 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
         _logger.LogInformation("[{JobId}] Pipeline complete. LLM calls: {Calls}, Iterations: {Iter}, Time: {Ms}ms",
             jobId, totalLlmCalls, correctionIterations, sw.ElapsedMilliseconds);
 
+        // ── PHASE 10: Bounding Box Resolution ─────────────────────────────────
+        // Match extracted rawStr values back to OCR coordinates for polygon data.
+        _logger.LogInformation("[{JobId}] Phase 10: Resolving bounding boxes...", jobId);
+        var fieldsWithBounds = ResolveBoundingBoxes(formatted.Fields, ocrLines, ocrWords);
+
         // ── Resolve Requested Fields ──────────────────────────────────────────
-        // Map the user's prompt to the relevant field names from both extracted
-        // and generated fields so the caller can see exactly what they asked for.
-        var requestedFields = await ResolveRequestedFieldsAsync(
-            userPrompt, formatted.Fields, generatedFields, ct);
-        totalLlmCalls++;
+        // Use schema role to determine which fields the user explicitly requested.
+        // Fields with role "extract" are user-requested; "source" are intermediate.
+        var requestedFields = ResolveRequestedFieldsFromRole(
+            schema, fieldsWithBounds, generatedFields);
 
         return new ExtractionJobResult
         {
-            JobId           = jobId,
-            Status          = JobStatus.Completed,
-            RequestedFields = requestedFields,
-            Fields          = formatted.Fields,
-            TableFields     = tables,
-            GeneratedFields = generatedFields,
-            Metadata        = new ExtractionMetadata
+            JobId             = jobId,
+            Status            = JobStatus.Completed,
+            RequestedFields   = requestedFields,
+            Fields            = fieldsWithBounds,
+            TableFields       = tables,
+            GeneratedFields   = generatedFields,
+            GenerationScripts = generationScripts,
+            Metadata          = new ExtractionMetadata
             {
                 LlmCallCount         = totalLlmCalls,
                 CorrectionIterations = correctionIterations,
@@ -250,5 +262,73 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
             _logger.LogWarning(ex, "Failed to resolve requested fields — returning empty.");
             return [];
         }
+    }
+
+    /// <summary>
+    /// Deterministically resolves requested fields using schema role.
+    /// Fields with role "extract" are user-requested; generated fields are always included.
+    /// No LLM call needed — saves one call vs the old approach.
+    /// </summary>
+    private static Dictionary<string, RequestedFieldResult> ResolveRequestedFieldsFromRole(
+        ExtractionSchema schema,
+        IReadOnlyDictionary<string, ExtractionFieldResult> fields,
+        Dictionary<string, object?> generatedFields)
+    {
+        var result = new Dictionary<string, RequestedFieldResult>();
+
+        // Include all "extract" role fields (user-requested)
+        foreach (var fieldDef in schema.Fields.Where(f => f.Role == FieldRole.Extract))
+        {
+            if (fields.TryGetValue(fieldDef.Name, out var extracted))
+            {
+                result[fieldDef.Name] = new RequestedFieldResult
+                {
+                    Value          = extracted.Value,
+                    Confidence     = extracted.Confidence,
+                    IsVerified     = extracted.IsVerified,
+                    Source         = "extracted",
+                    BoundingRegions = extracted.BoundingRegions
+                };
+            }
+        }
+
+        // Include all generated fields (always user-requested by definition)
+        foreach (var (name, value) in generatedFields)
+        {
+            result[name] = new RequestedFieldResult
+            {
+                Value      = value,
+                Confidence = null,
+                IsVerified = false,
+                Source     = "generated"
+            };
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Resolves bounding boxes for all extracted fields by matching their rawStr
+    /// against OCR word/line coordinates.
+    /// </summary>
+    private static Dictionary<string, ExtractionFieldResult> ResolveBoundingBoxes(
+        IReadOnlyDictionary<string, ExtractionFieldResult> fields,
+        IReadOnlyList<OcrLine> ocrLines,
+        IReadOnlyList<OcrWord> ocrWords)
+    {
+        var result = new Dictionary<string, ExtractionFieldResult>();
+
+        foreach (var (name, field) in fields)
+        {
+            // Use rawStr if available, fall back to string value
+            var searchText = !string.IsNullOrEmpty(field.RawStr)
+                ? field.RawStr
+                : field.Value?.ToString() ?? "";
+
+            var regions = BoundingBoxLookupService.FindBoundingRegions(searchText, ocrLines, ocrWords);
+            result[name] = field with { BoundingRegions = regions };
+        }
+
+        return result;
     }
 }

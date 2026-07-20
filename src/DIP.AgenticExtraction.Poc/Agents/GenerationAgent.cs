@@ -7,7 +7,10 @@ using OpenAI.Chat;
 
 namespace DIP.AgenticExtraction.Poc.Agents;
 
-public record GenerationResult(Dictionary<string, object?> Results, int LlmCallCount);
+public record GenerationResult(
+    Dictionary<string, object?> Results,
+    int LlmCallCount,
+    Dictionary<string, string> GeneratedScripts);
 
 // ScriptGlobals: the data context available inside Roslyn scripts.
 public class ScriptGlobals
@@ -47,10 +50,11 @@ public class GenerationAgent : IGenerationAgent
         CancellationToken ct = default)
     {
         var results = new Dictionary<string, object?>();
+        var scripts = new Dictionary<string, string>();
         int llmCalls = 0;
 
         if (schema.GenerationFields.Count == 0)
-            return new GenerationResult(results, 0);
+            return new GenerationResult(results, 0, scripts);
 
         // A mutable working set — each computed field becomes available to later fields.
         var working = new Dictionary<string, ExtractionFieldResult>(fields);
@@ -93,8 +97,12 @@ public class GenerationAgent : IGenerationAgent
                 || BlockedPatterns.Any(p => code.Contains(p, StringComparison.OrdinalIgnoreCase)))
             {
                 results[field.Name] = null;
+                scripts[field.Name] = $"// REJECTED (blocked pattern detected): {code}";
                 continue;
             }
+
+            // Store the generated script
+            scripts[field.Name] = code;
 
             // 3. Execute with Roslyn in a sandboxed globals context.
             try
@@ -129,7 +137,7 @@ public class GenerationAgent : IGenerationAgent
             }
         }
 
-        return new GenerationResult(results, llmCalls);
+        return new GenerationResult(results, llmCalls, scripts);
     }
 
     // Strips markdown fences / stray backticks and trailing semicolons the model may add.
