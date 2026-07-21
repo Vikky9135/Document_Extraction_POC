@@ -1,5 +1,6 @@
 using System.Text.Json;
 using Azure.Storage.Blobs;
+using Azure.Storage.Blobs.Models;
 using DIP.AgenticExtraction.Poc.Options;
 using Microsoft.Extensions.Options;
 
@@ -7,11 +8,17 @@ namespace DIP.AgenticExtraction.Poc.Services;
 
 public interface IBlobStorageService
 {
-    Task UploadPdfAsync(string jobId, Stream pdfStream, CancellationToken ct = default);
-    Task<Stream> DownloadPdfAsync(string jobId, CancellationToken ct = default);
-    Task SaveJsonAsync<T>(string jobId, string fileName, T obj, CancellationToken ct = default);
-    Task<T?> LoadJsonAsync<T>(string jobId, string fileName, CancellationToken ct = default);
-    string GetBlobPath(string jobId, string fileName) => $"jobs/{jobId}/{fileName}";
+    /// <summary>Upload a PDF to classification folder: {classificationId}/{fileName}.pdf</summary>
+    Task UploadPdfAsync(string classificationId, string fileName, Stream pdfStream, CancellationToken ct = default);
+
+    /// <summary>Save JSON to classification folder: {classificationId}/{fileName}</summary>
+    Task SaveJsonAsync<T>(string classificationId, string fileName, T obj, CancellationToken ct = default);
+
+    /// <summary>Load JSON from classification folder: {classificationId}/{fileName}</summary>
+    Task<T?> LoadJsonAsync<T>(string classificationId, string fileName, CancellationToken ct = default);
+
+    /// <summary>List all blobs under a classification prefix with an optional suffix filter.</summary>
+    Task<List<string>> ListBlobsAsync(string classificationId, string? suffixFilter = null, CancellationToken ct = default);
 }
 
 public class BlobStorageService : IBlobStorageService
@@ -30,34 +37,39 @@ public class BlobStorageService : IBlobStorageService
         _container.CreateIfNotExists();
     }
 
-    public async Task UploadPdfAsync(string jobId, Stream pdfStream, CancellationToken ct = default)
+    public async Task UploadPdfAsync(string classificationId, string fileName, Stream pdfStream, CancellationToken ct = default)
     {
         await _container.CreateIfNotExistsAsync(cancellationToken: ct);
-        var blob = _container.GetBlobClient($"jobs/{jobId}/source.pdf");
+        var blob = _container.GetBlobClient($"{classificationId}/{fileName}");
         await blob.UploadAsync(pdfStream, overwrite: true, cancellationToken: ct);
     }
 
-    public async Task<Stream> DownloadPdfAsync(string jobId, CancellationToken ct = default)
-    {
-        var blob = _container.GetBlobClient($"jobs/{jobId}/source.pdf");
-        var response = await blob.DownloadStreamingAsync(cancellationToken: ct);
-        return response.Value.Content;
-    }
-
-    public async Task SaveJsonAsync<T>(string jobId, string fileName, T obj, CancellationToken ct = default)
+    public async Task SaveJsonAsync<T>(string classificationId, string fileName, T obj, CancellationToken ct = default)
     {
         await _container.CreateIfNotExistsAsync(cancellationToken: ct);
-        var blob = _container.GetBlobClient($"jobs/{jobId}/{fileName}");
+        var blob = _container.GetBlobClient($"{classificationId}/{fileName}");
         var bytes = JsonSerializer.SerializeToUtf8Bytes(obj, JsonOptions);
         using var ms = new MemoryStream(bytes);
         await blob.UploadAsync(ms, overwrite: true, cancellationToken: ct);
     }
 
-    public async Task<T?> LoadJsonAsync<T>(string jobId, string fileName, CancellationToken ct = default)
+    public async Task<T?> LoadJsonAsync<T>(string classificationId, string fileName, CancellationToken ct = default)
     {
-        var blob = _container.GetBlobClient($"jobs/{jobId}/{fileName}");
+        var blob = _container.GetBlobClient($"{classificationId}/{fileName}");
         if (!await blob.ExistsAsync(ct)) return default;
         var response = await blob.DownloadContentAsync(cancellationToken: ct);
         return JsonSerializer.Deserialize<T>(response.Value.Content.ToArray(), JsonOptions);
+    }
+
+    public async Task<List<string>> ListBlobsAsync(string classificationId, string? suffixFilter = null, CancellationToken ct = default)
+    {
+        var results = new List<string>();
+        var prefix = $"{classificationId}/";
+        await foreach (var item in _container.GetBlobsAsync(BlobTraits.None, BlobStates.None, prefix, ct))
+        {
+            if (suffixFilter is null || item.Name.EndsWith(suffixFilter, StringComparison.OrdinalIgnoreCase))
+                results.Add(item.Name);
+        }
+        return results;
     }
 }

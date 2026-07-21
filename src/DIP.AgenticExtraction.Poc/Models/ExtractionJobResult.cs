@@ -29,6 +29,7 @@ public record RequestedFieldResult
     public int? Confidence { get; init; }       // null for generated fields
     public bool IsVerified { get; init; }
     public string Source { get; init; } = "";   // "extracted" or "generated"
+    public string? RawStr { get; init; }         // Exact string as it appeared in document (extracted fields only)
     /// <summary>Where in the document this value was found (page + polygon).</summary>
     public List<BoundingRegion> BoundingRegions { get; init; } = [];
 }

@@ -283,10 +283,11 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
             {
                 result[fieldDef.Name] = new RequestedFieldResult
                 {
-                    Value          = extracted.Value,
-                    Confidence     = extracted.Confidence,
-                    IsVerified     = extracted.IsVerified,
-                    Source         = "extracted",
+                    Value           = extracted.Value,
+                    Confidence      = extracted.Confidence,
+                    IsVerified      = extracted.IsVerified,
+                    Source          = "extracted",
+                    RawStr          = extracted.RawStr,
                     BoundingRegions = extracted.BoundingRegions
                 };
             }
