@@ -9,6 +9,7 @@ namespace DIP.AgenticExtraction.Poc.Orchestration;
 public interface IAgenticExtractionOrchestrator
 {
     // Phases 5-9: Extract -> Verify -> Correct (loop) -> Format -> Generate -> assemble result.
+    // Returns a list of instance results (one per entity found in the document).
     Task<ExtractionJobResult> RunAsync(
         string jobId,
         ExtractionSchema schema,
@@ -59,123 +60,135 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
         int totalLlmCalls = 0;
         int correctionIterations = 0;
 
-        // ── PHASE 5: Initial Extraction ───────────────────────────────────────
-        _logger.LogInformation("[{JobId}] Phase 5: Extracting {N} fields, {T} tables",
+        // ── PHASE 5: Initial Extraction (multi-instance) ──────────────────────
+        _logger.LogInformation("[{JobId}] Phase 5: Extracting {N} fields, {T} tables (multi-instance)",
             jobId, schema.Fields.Count, schema.TableFields.Count);
-        var (fields, tables, extractCalls) =
+        var (instances, extractCalls) =
             await _extractionAgent.ExtractFieldsAsync(schema, structuredText, null, ct);
         totalLlmCalls += extractCalls;
 
-        // ── PHASE 6: Initial Verification ─────────────────────────────────────
-        _logger.LogInformation("[{JobId}] Phase 6: Verifying all fields", jobId);
-        var verification = await _verificationAgent.VerifyFieldsAsync(schema, fields, structuredText, ct);
-        totalLlmCalls++;
+        _logger.LogInformation("[{JobId}] Phase 5: Found {Count} instance(s) in document",
+            jobId, instances.Count);
 
-        foreach (var (name, verdict) in verification.Fields)
-            if (fields.TryGetValue(name, out var f))
-                fields[name] = f with { IsVerified = verdict.Correct };
+        // Process each instance through verification → correction → formatting → generation
+        var instanceResults = new List<InstanceResult>();
+        Dictionary<string, string> generationScripts = [];
 
-        // ── PHASE 7: Correction Loop (up to schema.Options.MaxIter) ────────────
-        var maxIter = schema.Options.MaxIter;
-        var iter = 0;
-
-        while (!verification.AllCorrect && iter < maxIter)
+        for (int idx = 0; idx < instances.Count; idx++)
         {
-            iter++;
-            correctionIterations++;
+            var instance = instances[idx];
+            var instanceId = $"{jobId}-inst{idx + 1}";
+            var fields = instance.Fields;
+            var tables = instance.Tables;
 
-            var failedFieldNames = verification.FailedFieldNames.ToHashSet();
-            _logger.LogInformation("[{JobId}] Phase 7 iteration {Iter}: re-extracting {Count} failed fields: {Fields}",
-                jobId, iter, failedFieldNames.Count, string.Join(", ", failedFieldNames));
+            _logger.LogInformation("[{JobId}] Processing instance {Idx}/{Total}",
+                jobId, idx + 1, instances.Count);
 
-            // Inject verifier feedback into the JSON Schema field descriptions.
-            var feedbackOverrides = verification.Fields
-                .Where(kvp => !kvp.Value.Correct && !string.IsNullOrWhiteSpace(kvp.Value.Feedback))
-                .ToDictionary(kvp => kvp.Key, kvp => kvp.Value.Feedback);
-
-            var failedFields = schema.Fields.Where(f => failedFieldNames.Contains(f.Name)).ToList();
-            var failedSchema = schema with { Fields = failedFields, TableFields = [] };
-
-            // Re-extract only the failed fields.
-            var (correctedFields, _, reExtractCalls) =
-                await _extractionAgent.ExtractFieldsAsync(failedSchema, structuredText, feedbackOverrides, ct);
-            totalLlmCalls += reExtractCalls;
-
-            foreach (var (name, result) in correctedFields)
-                fields[name] = result;
-
-            // Re-verify only the corrected fields.
-            var reVerification =
-                await _verificationAgent.VerifyFieldsAsync(failedSchema, correctedFields, structuredText, ct);
+            // ── PHASE 6: Verification ─────────────────────────────────────────
+            var verification = await _verificationAgent.VerifyFieldsAsync(schema, fields, structuredText, ct);
             totalLlmCalls++;
 
-            foreach (var (name, verdict) in reVerification.Fields)
-            {
-                verification.Fields[name] = verdict;
+            foreach (var (name, verdict) in verification.Fields)
                 if (fields.TryGetValue(name, out var f))
                     fields[name] = f with { IsVerified = verdict.Correct };
-            }
 
-            // On the final iteration, penalise confidence for fields still failing.
-            if (iter == maxIter)
+            // ── PHASE 7: Correction Loop ──────────────────────────────────────
+            var maxIter = schema.Options.MaxIter;
+            var iter = 0;
+
+            while (!verification.AllCorrect && iter < maxIter)
             {
-                foreach (var name in verification.FailedFieldNames.ToList())
+                iter++;
+                correctionIterations++;
+
+                var failedFieldNames = verification.FailedFieldNames.ToHashSet();
+                _logger.LogInformation("[{JobId}] Instance {Idx} correction iter {Iter}: {Count} failed fields",
+                    jobId, idx + 1, iter, failedFieldNames.Count);
+
+                var feedbackOverrides = verification.Fields
+                    .Where(kvp => !kvp.Value.Correct && !string.IsNullOrWhiteSpace(kvp.Value.Feedback))
+                    .ToDictionary(kvp => kvp.Key, kvp => kvp.Value.Feedback);
+
+                var failedFields = schema.Fields.Where(f => failedFieldNames.Contains(f.Name)).ToList();
+                var failedSchema = schema with { Fields = failedFields, TableFields = [] };
+
+                var (correctedInstances, reExtractCalls) =
+                    await _extractionAgent.ExtractFieldsAsync(failedSchema, structuredText, feedbackOverrides, ct);
+                totalLlmCalls += reExtractCalls;
+
+                // Use first instance from correction (correction is for specific fields)
+                if (correctedInstances.Count > 0)
+                {
+                    foreach (var (name, result) in correctedInstances[0].Fields)
+                        fields[name] = result;
+                }
+
+                var reVerification =
+                    await _verificationAgent.VerifyFieldsAsync(failedSchema,
+                        correctedInstances.Count > 0 ? correctedInstances[0].Fields : fields,
+                        structuredText, ct);
+                totalLlmCalls++;
+
+                foreach (var (name, verdict) in reVerification.Fields)
+                {
+                    verification.Fields[name] = verdict;
                     if (fields.TryGetValue(name, out var f))
-                    {
-                        fields[name] = f with
+                        fields[name] = f with { IsVerified = verdict.Correct };
+                }
+
+                if (iter == maxIter)
+                {
+                    foreach (var name in verification.FailedFieldNames.ToList())
+                        if (fields.TryGetValue(name, out var f))
                         {
-                            Confidence = Math.Max(0, f.Confidence - 30),
-                            IsVerified = false
-                        };
-                        _logger.LogWarning("[{JobId}] Field '{Field}' failed verification after {MaxIter} iterations. Accepted with reduced confidence.",
-                            jobId, name, maxIter);
-                    }
+                            fields[name] = f with
+                            {
+                                Confidence = Math.Max(0, f.Confidence - 30),
+                                IsVerified = false
+                            };
+                        }
+                }
             }
-        }
 
-        // ── PHASE 8: Formatter Agent ──────────────────────────────────────────
-        _logger.LogInformation("[{JobId}] Phase 8: Formatting fields", jobId);
-        var formatted = await _formatterAgent.FormatAsync(schema, fields, ct);
-        totalLlmCalls += formatted.FormatterCallCount;
+            // ── PHASE 8: Formatter ────────────────────────────────────────────
+            var formatted = await _formatterAgent.FormatAsync(schema, fields, ct);
+            totalLlmCalls += formatted.FormatterCallCount;
 
-        // ── PHASE 9: Generation Fields ────────────────────────────────────────
-        // Use pre-formatted fields for computation — formatted values may contain
-        // locale symbols (commas, currency) that break numeric parsing in Roslyn.
-        Dictionary<string, object?> generatedFields = [];
-        Dictionary<string, string> generationScripts = [];
-        if (schema.GenerationFields.Count > 0)
-        {
-            _logger.LogInformation("[{JobId}] Phase 9: Computing {Count} generation fields",
-                jobId, schema.GenerationFields.Count);
-            var genResult = await _generationAgent.ComputeAsync(schema, fields, ct);
-            generatedFields = genResult.Results;
-            generationScripts = genResult.GeneratedScripts;
-            totalLlmCalls += genResult.LlmCallCount;
+            // ── PHASE 9: Generation Fields ────────────────────────────────────
+            Dictionary<string, object?> generatedFields = [];
+            if (schema.GenerationFields.Count > 0)
+            {
+                var genResult = await _generationAgent.ComputeAsync(schema, fields, ct);
+                generatedFields = genResult.Results;
+                if (idx == 0) generationScripts = genResult.GeneratedScripts;
+                totalLlmCalls += genResult.LlmCallCount;
+            }
+
+            // ── PHASE 10: Bounding Box Resolution ─────────────────────────────
+            var fieldsWithBounds = ResolveBoundingBoxes(formatted.Fields, ocrLines, ocrWords);
+
+            // ── Resolve Requested Fields ──────────────────────────────────────
+            var requestedFields = ResolveRequestedFieldsFromRole(
+                schema, fieldsWithBounds, generatedFields);
+
+            instanceResults.Add(new InstanceResult
+            {
+                RequestedFields = requestedFields,
+                Fields          = fieldsWithBounds,
+                TableFields     = tables,
+                GeneratedFields = generatedFields
+            });
         }
 
         sw.Stop();
-        _logger.LogInformation("[{JobId}] Pipeline complete. LLM calls: {Calls}, Iterations: {Iter}, Time: {Ms}ms",
-            jobId, totalLlmCalls, correctionIterations, sw.ElapsedMilliseconds);
-
-        // ── PHASE 10: Bounding Box Resolution ─────────────────────────────────
-        // Match extracted rawStr values back to OCR coordinates for polygon data.
-        _logger.LogInformation("[{JobId}] Phase 10: Resolving bounding boxes...", jobId);
-        var fieldsWithBounds = ResolveBoundingBoxes(formatted.Fields, ocrLines, ocrWords);
-
-        // ── Resolve Requested Fields ──────────────────────────────────────────
-        // Use schema role to determine which fields the user explicitly requested.
-        // Fields with role "extract" are user-requested; "source" are intermediate.
-        var requestedFields = ResolveRequestedFieldsFromRole(
-            schema, fieldsWithBounds, generatedFields);
+        _logger.LogInformation("[{JobId}] Pipeline complete. {InstCount} instances, LLM calls: {Calls}, Corrections: {Iter}, Time: {Ms}ms",
+            jobId, instanceResults.Count, totalLlmCalls, correctionIterations, sw.ElapsedMilliseconds);
 
         return new ExtractionJobResult
         {
             JobId             = jobId,
             Status            = JobStatus.Completed,
-            RequestedFields   = requestedFields,
-            Fields            = fieldsWithBounds,
-            TableFields       = tables,
-            GeneratedFields   = generatedFields,
+            Instances         = instanceResults,
             GenerationScripts = generationScripts,
             Metadata          = new ExtractionMetadata
             {

@@ -248,20 +248,18 @@ public static class ExtractionEndpoints
                     docId, schema, ocr.StructuredText, userPrompt, ocr.PageCount,
                     ocr.Lines, ocr.Words, ct);
 
-                logger.LogInformation("│  │  Result: {F} fields extracted, {V} verified, {G} generated",
-                    result.Fields.Count,
-                    result.Fields.Count(f => f.Value.IsVerified),
-                    result.GeneratedFields.Count);
-                logger.LogInformation("│  │  LLM calls: {Calls}, Corrections: {Iter}, Time: {Ms}ms",
+                logger.LogInformation("│  │  Result: {InstCount} instance(s), LLM calls: {Calls}, Corrections: {Iter}, Time: {Ms}ms",
+                    result.Instances.Count,
                     result.Metadata.LlmCallCount, result.Metadata.CorrectionIterations,
                     result.Metadata.ProcessingTimeMs);
                 logger.LogInformation("│  └─ Document [{Index}/{Total}]: DONE", i + 1, ocrDocuments.Count);
 
-                // Save per-document extraction result (only requested fields)
+                // Save per-document extraction result (instances with only requested fields)
                 var docResult = new
                 {
                     pageCount = ocr.PageCount,
-                    fields = result.RequestedFields,
+                    instanceCount = result.Instances.Count,
+                    instances = result.Instances.Select(inst => inst.RequestedFields).ToList(),
                     metadata = result.Metadata with { OcrPageCount = ocr.PageCount }
                 };
                 await blobStorage.SaveJsonAsync(classificationId, extractionBlobName, docResult, ct);

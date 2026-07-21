@@ -8,16 +8,20 @@ namespace DIP.AgenticExtraction.Poc.Agents;
 
 public interface IExtractionAgent
 {
-    // Phase 5 — one structured call for ALL fields. feedbackOverrides supports Phase 7 re-extraction.
-    Task<(Dictionary<string, ExtractionFieldResult> Fields,
-          Dictionary<string, List<Dictionary<string, object?>>> Tables,
-          int LlmCallCount)>
+    // Phase 5 — one structured call for ALL fields across ALL instances in the document.
+    // Returns a list of instances, each with its own set of fields and tables.
+    Task<(List<ExtractionInstance> Instances, int LlmCallCount)>
         ExtractFieldsAsync(
             ExtractionSchema schema,
             string structuredText,
             IReadOnlyDictionary<string, string>? feedbackOverrides = null,
             CancellationToken ct = default);
 }
+
+/// <summary>One extracted entity instance (e.g., one invoice within a multi-invoice document).</summary>
+public record ExtractionInstance(
+    Dictionary<string, ExtractionFieldResult> Fields,
+    Dictionary<string, List<Dictionary<string, object?>>> Tables);
 
 // Phase 5 — uses O3 (reasoning_effort: high).
 public class ExtractionAgent : IExtractionAgent
@@ -26,9 +30,7 @@ public class ExtractionAgent : IExtractionAgent
 
     public ExtractionAgent(ChatClient o3Client) => _o3Client = o3Client;
 
-    public async Task<(Dictionary<string, ExtractionFieldResult> Fields,
-                       Dictionary<string, List<Dictionary<string, object?>>> Tables,
-                       int LlmCallCount)>
+    public async Task<(List<ExtractionInstance> Instances, int LlmCallCount)>
         ExtractFieldsAsync(
             ExtractionSchema schema,
             string structuredText,
@@ -54,24 +56,47 @@ public class ExtractionAgent : IExtractionAgent
         };
 
         // 3. Call Azure OpenAI O3 with strict structured output.
-        //    o3 reasons deeply before extracting ambiguous fields (uses its default reasoning effort).
         var response = await _o3Client.CompleteChatAsync(messages, new ChatCompletionOptions
         {
             ResponseFormat = responseFormat
         }, ct);
 
-        // 4. Parse the guaranteed-structured JSON response.
-        var (fields, tables) = ParseExtractionResponse(response.Value.Content[0].Text, schema);
-        return (fields, tables, 1);
+        // 4. Parse the guaranteed-structured JSON response (array of instances).
+        var instances = ParseExtractionResponse(response.Value.Content[0].Text, schema);
+        return (instances, 1);
     }
 
-    private static (Dictionary<string, ExtractionFieldResult>,
-                    Dictionary<string, List<Dictionary<string, object?>>>)
-        ParseExtractionResponse(string json, ExtractionSchema schema)
+    private static List<ExtractionInstance> ParseExtractionResponse(string json, ExtractionSchema schema)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
+        var instances = new List<ExtractionInstance>();
+
+        // Response shape: { "instances": [ { field1: {...}, field2: {...}, ... }, ... ] }
+        if (root.TryGetProperty("instances", out var instancesArray)
+            && instancesArray.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var instanceEl in instancesArray.EnumerateArray())
+            {
+                var (fields, tables) = ParseSingleInstance(instanceEl, schema);
+                instances.Add(new ExtractionInstance(fields, tables));
+            }
+        }
+
+        // Fallback: if no "instances" wrapper, treat root as a single instance (backward compat)
+        if (instances.Count == 0)
+        {
+            var (fields, tables) = ParseSingleInstance(root, schema);
+            instances.Add(new ExtractionInstance(fields, tables));
+        }
+
+        return instances;
+    }
+
+    private static (Dictionary<string, ExtractionFieldResult>, Dictionary<string, List<Dictionary<string, object?>>>)
+        ParseSingleInstance(JsonElement root, ExtractionSchema schema)
+    {
         var fields = new Dictionary<string, ExtractionFieldResult>();
         foreach (var field in schema.Fields)
         {
@@ -88,7 +113,7 @@ public class ExtractionAgent : IExtractionAgent
                 Value      = ConvertValue(extraction, field.Type),
                 Confidence = confidence,
                 RawStr     = rawStr,
-                IsVerified = false   // Set later by VerificationAgent.
+                IsVerified = false
             };
         }
 

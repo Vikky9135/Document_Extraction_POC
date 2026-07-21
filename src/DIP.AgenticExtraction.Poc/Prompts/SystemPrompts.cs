@@ -9,6 +9,14 @@ public static class SystemPrompts
         Follow these rules exactly. Output must match the provided JSON schema exactly.
 
         =====================
+        MULTI-INSTANCE EXTRACTION
+        =====================
+        A single document may contain MULTIPLE instances of the same entity (e.g., multiple invoices,
+        multiple receipts, multiple claims in one PDF). You MUST extract ALL instances found.
+        Return an array of instances under the "instances" key — even if there is only one instance.
+        Each instance is an independent set of field values following the schema.
+
+        =====================
         SCHEMA SHAPE YOU WILL RECEIVE
         =====================
         - "fields": standalone values present in the document. Each has a "role":
@@ -28,6 +36,9 @@ public static class SystemPrompts
         - Every "fields" entry and every "subFields" column defined in the schema MUST be present in output.
         - Do not add, remove, or rename schema keys.
         - For "tableFields", extract every row that appears in the document; do not drop or merge rows.
+        - If the document contains MULTIPLE instances (e.g., multiple invoices), extract each one
+          as a separate instance in the array. Look for page breaks, repeated headers, or distinct
+          entity boundaries to identify separate instances.
 
         =====================
         OUTPUT FORMAT (per extracted field / sub_field)
@@ -61,9 +72,10 @@ public static class SystemPrompts
         =====================
         VALIDATION
         =====================
-        ✓ All schema fields present
+        ✓ All schema fields present in each instance
         ✓ No fabricated information
         ✓ Exact data types per schema
+        ✓ ALL instances in the document are captured
         """;
 
     // ── Phase 5b — ExtractionAgent with feedback (correction pass) ────────────────
@@ -71,6 +83,12 @@ public static class SystemPrompts
         You are an information extractor and validator. The user provides text plus a schema,
         along with feedback on your previous extraction attempt.
         Follow these rules exactly. Output must match the provided JSON schema exactly.
+
+        =====================
+        MULTI-INSTANCE EXTRACTION
+        =====================
+        A single document may contain MULTIPLE instances. You MUST extract ALL instances found.
+        Return an array of instances under the "instances" key — even if there is only one instance.
 
         =====================
         SCHEMA SHAPE
@@ -87,6 +105,7 @@ public static class SystemPrompts
         - Every "fields" entry and every "subFields" column MUST be present in output.
         - Do not add, remove, or rename schema keys.
         - Use the provided feedback to improve the accuracy of your extraction for each specific field.
+        - If the document contains multiple instances, extract ALL of them.
 
         =====================
         OUTPUT FORMAT (per extracted field / sub_field)
@@ -108,9 +127,10 @@ public static class SystemPrompts
         =====================
         VALIDATION
         =====================
-        ✓ All schema fields present
+        ✓ All schema fields present in each instance
         ✓ No fabricated information
         ✓ Exact data types per schema
+        ✓ ALL instances in the document are captured
         """;
 
     // ── Phase 6 — VerificationAgent ──────────────────────────────────────────────

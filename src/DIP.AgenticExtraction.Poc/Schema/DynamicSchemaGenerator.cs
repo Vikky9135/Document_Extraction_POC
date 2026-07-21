@@ -9,6 +9,7 @@ public static class DynamicSchemaGenerator
 {
     // Phase 5 — builds the JSON Schema for the ExtractionAgent structured output call.
     // feedbackOverrides injects verifier feedback into per-field descriptions (Phase 7).
+    // Returns a schema with "instances" array — each element is one entity instance.
     public static JsonObject GenerateExtractionSchema(
         IReadOnlyList<GenericField> fields,
         IReadOnlyList<TableField> tableFields,
@@ -32,12 +33,29 @@ public static class DynamicSchemaGenerator
             required.Add(table.Name);
         }
 
-        return new JsonObject
+        // Wrap in an "instances" array to support multi-instance extraction
+        var instanceSchema = new JsonObject
         {
             ["type"]                 = "object",
             ["additionalProperties"] = false,
             ["required"]             = required,
             ["properties"]           = properties
+        };
+
+        return new JsonObject
+        {
+            ["type"]                 = "object",
+            ["additionalProperties"] = false,
+            ["required"]             = new JsonArray("instances"),
+            ["properties"]           = new JsonObject
+            {
+                ["instances"] = new JsonObject
+                {
+                    ["type"]        = "array",
+                    ["description"] = "Array of all entity instances found in the document. Extract ALL instances (e.g., all invoices, all receipts). Always return at least one instance.",
+                    ["items"]       = instanceSchema
+                }
+            }
         };
     }
 
