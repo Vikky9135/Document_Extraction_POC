@@ -9,10 +9,12 @@ namespace DIP.AgenticExtraction.Poc.Agents;
 public interface IVerificationAgent
 {
     // Phase 6 — independent, skeptical fact-check of every extracted value.
+    // instanceContext provides instance metadata for cross-entity contamination checks.
     Task<VerificationResult> VerifyFieldsAsync(
         ExtractionSchema schema,
         IReadOnlyDictionary<string, ExtractionFieldResult> extracted,
         string structuredText,
+        string? instanceContext = null,
         CancellationToken ct = default);
 }
 
@@ -27,6 +29,7 @@ public class VerificationAgent : IVerificationAgent
         ExtractionSchema schema,
         IReadOnlyDictionary<string, ExtractionFieldResult> extracted,
         string structuredText,
+        string? instanceContext = null,
         CancellationToken ct = default)
     {
         // Only verify flat fields — table rows are not fact-checked in this pass.
@@ -44,10 +47,15 @@ public class VerificationAgent : IVerificationAgent
             null,
             true);
 
+        // Build user message with optional instance context
+        var userMessage = string.IsNullOrEmpty(instanceContext)
+            ? structuredText
+            : $"{instanceContext}\n\n{structuredText}";
+
         var messages = new List<ChatMessage>
         {
             new SystemChatMessage(SystemPrompts.VerifierSystemPrompt),
-            new UserChatMessage(structuredText)
+            new UserChatMessage(userMessage)
         };
 
         var response = await _o3Client.CompleteChatAsync(messages, new ChatCompletionOptions

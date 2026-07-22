@@ -53,6 +53,8 @@ public record InstanceResult
     public Dictionary<string, ExtractionFieldResult> Fields { get; init; } = [];
     public Dictionary<string, List<Dictionary<string, object?>>> TableFields { get; init; } = [];
     public Dictionary<string, object?> GeneratedFields { get; init; } = [];
+    /// <summary>Page numbers (1-indexed) from which this instance's data was extracted.</summary>
+    public List<int> SourcePages { get; init; } = [];
 }
 
 public record ExtractionMetadata

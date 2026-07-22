@@ -70,6 +70,11 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
         _logger.LogInformation("[{JobId}] Phase 5: Found {Count} instance(s) in document",
             jobId, instances.Count);
 
+        // ── PHASE 5b: Deduplicate instances with identical sourcePages ────────
+        instances = DeduplicateInstances(instances, jobId);
+        _logger.LogInformation("[{JobId}] Phase 5b: {Count} instance(s) after dedup",
+            jobId, instances.Count);
+
         // Process each instance through verification → correction → formatting → generation
         var instanceResults = new List<InstanceResult>();
         Dictionary<string, string> generationScripts = [];
@@ -84,8 +89,13 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
             _logger.LogInformation("[{JobId}] Processing instance {Idx}/{Total}",
                 jobId, idx + 1, instances.Count);
 
+            // Build instance context for the verifier — tells it which instance this is
+            // and which pages the values should come from.
+            var instanceContext = BuildInstanceContext(instances, idx);
+
             // ── PHASE 6: Verification ─────────────────────────────────────────
-            var verification = await _verificationAgent.VerifyFieldsAsync(schema, fields, structuredText, ct);
+            var verification = await _verificationAgent.VerifyFieldsAsync(
+                schema, fields, structuredText, instanceContext, ct);
             totalLlmCalls++;
 
             foreach (var (name, verdict) in verification.Fields)
@@ -126,7 +136,7 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
                 var reVerification =
                     await _verificationAgent.VerifyFieldsAsync(failedSchema,
                         correctedInstances.Count > 0 ? correctedInstances[0].Fields : fields,
-                        structuredText, ct);
+                        structuredText, instanceContext, ct);
                 totalLlmCalls++;
 
                 foreach (var (name, verdict) in reVerification.Fields)
@@ -141,10 +151,14 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
                     foreach (var name in verification.FailedFieldNames.ToList())
                         if (fields.TryGetValue(name, out var f))
                         {
+                            // Null out the value — showing a wrong value from another
+                            // entity is worse than showing nothing.
                             fields[name] = f with
                             {
-                                Confidence = Math.Max(0, f.Confidence - 30),
-                                IsVerified = false
+                                Value = null,
+                                Confidence = 0,
+                                IsVerified = false,
+                                RawStr = ""
                             };
                         }
                 }
@@ -176,7 +190,8 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
                 RequestedFields = requestedFields,
                 Fields          = fieldsWithBounds,
                 TableFields     = tables,
-                GeneratedFields = generatedFields
+                GeneratedFields = generatedFields,
+                SourcePages     = instance.SourcePages
             });
         }
 
@@ -344,5 +359,73 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
         }
 
         return result;
+    }
+
+    /// <summary>
+    /// Builds context string for the verifier about which instance is being verified,
+    /// its source pages, and what other instances extracted (for duplicate detection).
+    /// </summary>
+    private static string BuildInstanceContext(List<ExtractionInstance> instances, int currentIdx)
+    {
+        var current = instances[currentIdx];
+        var pages = current.SourcePages.Count > 0
+            ? string.Join(", ", current.SourcePages)
+            : "unknown";
+
+        var sb = new System.Text.StringBuilder();
+        sb.AppendLine($"=== INSTANCE CONTEXT ===");
+        sb.AppendLine($"You are verifying instance {currentIdx + 1} of {instances.Count}.");
+        sb.AppendLine($"This instance's data should come from page(s): {pages}.");
+        sb.AppendLine($"ONLY verify values against the content on page(s) {pages}.");
+        sb.AppendLine($"If a value is found on a DIFFERENT page, mark it as INCORRECT and specify the correct page.");
+
+        if (instances.Count > 1)
+        {
+            sb.AppendLine();
+            sb.AppendLine("Other instances in this document:");
+            for (int i = 0; i < instances.Count; i++)
+            {
+                if (i == currentIdx) continue;
+                var otherPages = instances[i].SourcePages.Count > 0
+                    ? string.Join(", ", instances[i].SourcePages)
+                    : "unknown";
+                sb.AppendLine($"  - Instance {i + 1}: pages {otherPages}");
+            }
+        }
+
+        sb.AppendLine("=== END INSTANCE CONTEXT ===");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Removes duplicate instances that share the same sourcePages.
+    /// When duplicates are found, keeps the first one.
+    /// </summary>
+    private List<ExtractionInstance> DeduplicateInstances(List<ExtractionInstance> instances, string jobId)
+    {
+        if (instances.Count <= 1) return instances;
+
+        var deduplicated = new List<ExtractionInstance>();
+        var seenPageSets = new HashSet<string>();
+
+        foreach (var instance in instances)
+        {
+            // Build a key from sorted sourcePages
+            var pageKey = instance.SourcePages.Count > 0
+                ? string.Join(",", instance.SourcePages.OrderBy(p => p))
+                : $"__unknown_{deduplicated.Count}"; // unique key for instances with no pages
+
+            if (seenPageSets.Add(pageKey))
+            {
+                deduplicated.Add(instance);
+            }
+            else
+            {
+                _logger.LogWarning("[{JobId}] Dropping duplicate instance with sourcePages [{Pages}]",
+                    jobId, pageKey);
+            }
+        }
+
+        return deduplicated;
     }
 }

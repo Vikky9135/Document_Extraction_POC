@@ -41,6 +41,48 @@ public static class SystemPrompts
           entity boundaries to identify separate instances.
 
         =====================
+        INSTANCE BOUNDARY RULES (CRITICAL)
+        =====================
+        - Each instance MUST represent exactly ONE logical entity (one invoice, one receipt, one claim).
+        - ALL field values within a single instance MUST come from the SAME logical entity/section.
+        - NEVER mix values from different entities into one instance.
+        - Use these signals to identify entity boundaries:
+            • A new page with a new header/title (e.g., "INVOICE", "Receipt", "Statement")
+            • A different entity identifier (different invoice number, receipt number, etc.)
+            • A different sender/recipient combination
+            • A visually distinct section with its own totals/summary
+        - If a field is not present in a particular entity, return null — do NOT borrow the value
+          from another entity on a different page.
+        - If the only matching value you can find is on a DIFFERENT page than the entity you are
+          extracting, return null. Do NOT cross page boundaries to fill missing fields.
+        - Use semantic matching: match fields by meaning, not exact label. If the document uses
+          a different label than the schema field name, treat the closest semantic equivalent
+          as the match.
+        - If two pages contain different entities, they are separate instances. Do NOT copy values
+          from one entity's page into another entity's instance.
+
+        =====================
+        sourcePages — PAGE TRACKING (REQUIRED)
+        =====================
+        - Each instance MUST include a "sourcePages" array listing which page(s) the instance's data
+          comes from (1-indexed).
+        - Two different instances MUST NOT share the same source pages (no overlap).
+        - If a document has 3 pages with 3 different entities, you must produce 3 instances, each
+          with distinct sourcePages (e.g., [1], [2], [3]).
+        - NEVER create two instances from the same page unless the page genuinely contains two
+          separate entities (e.g., two invoices side by side — which is extremely rare).
+
+        =====================
+        SELF-CHECK BEFORE RETURNING
+        =====================
+        Before returning your response, verify:
+        1. Does the number of instances match the number of distinct entities in the document?
+        2. Are all instances' sourcePages distinct (no overlap)?
+        3. Does every page that contains entity data appear in at least one instance's sourcePages?
+        4. Do any two instances have identical field values? If so, one is likely a duplicate — remove it.
+        5. For each instance, do ALL field values come from the pages listed in its sourcePages?
+
+        =====================
         OUTPUT FORMAT (per extracted field / sub_field)
         =====================
         "extraction":
@@ -49,6 +91,9 @@ public static class SystemPrompts
           - CRITICAL: For number/integer fields, return null when the value is NOT explicitly present
             in the document. Do NOT return 0 to indicate "not found" — 0 means the document
             explicitly states zero. If you cannot find the value, return null.
+          - UNIT MISMATCH: If the field expects a monetary amount but the document only shows
+            a percentage (or vice versa), return null. Do NOT extract a percentage as if it were
+            a monetary amount, or vice versa.
 
         "confidence":
           - High score when the value is confidently extracted.
@@ -106,6 +151,8 @@ public static class SystemPrompts
         - Do not add, remove, or rename schema keys.
         - Use the provided feedback to improve the accuracy of your extraction for each specific field.
         - If the document contains multiple instances, extract ALL of them.
+        - Each instance MUST include a "sourcePages" array listing which page(s) the data comes from.
+        - Two instances MUST NOT share the same source pages.
 
         =====================
         OUTPUT FORMAT (per extracted field / sub_field)
@@ -150,6 +197,16 @@ public static class SystemPrompts
           to make the extraction more accurate (e.g., be more specific, clarify intent).
         - If an extracted field is null or empty with a high confidence score, this indicates
           the extraction model is confident the information is not present in the document.
+
+        CRITICAL — Cross-entity contamination check:
+        - All extracted field values within the same instance must belong to the SAME logical entity.
+        - If you see field values that clearly come from DIFFERENT entities (e.g., an identifier
+          from one page but a total from a different page's entity), mark those fields as INCORRECT.
+        - In the feedback, state which page the wrong value came from and what the correct value
+          should be based on the entity's own page(s).
+        - IMPORTANT: If the user message includes an INSTANCE CONTEXT section, it tells you which
+          page(s) this instance's values should come from. ONLY verify values against content on
+          those specific pages. If a value is found on a different page, mark it as INCORRECT.
 
         For table fields:
         - Check that EVERY row from the table in the document is extracted.
@@ -211,7 +268,10 @@ public static class SystemPrompts
         Each entry:
           • name: concise, in camelCase.
           • description: detailed and specific.
-          • synonyms: meaningful alternatives found in the document, else [].
+          • synonyms: meaningful alternatives found across ALL pages of the document.
+            Include labels from different document types that refer to the same concept.
+            Cast a wide net — broader synonyms improve extraction accuracy across
+            heterogeneous documents.
           • type: one of "String", "Number", "Date", "Integer", or "Time".
           • fieldFormat: output format if specified (e.g., "YYYY-MM-DD"), otherwise null.
           • useVisionExtraction: false unless the value is purely visual (e.g. signature).
@@ -267,8 +327,11 @@ public static class SystemPrompts
         =====================
         Each entry:
           • name: camelCase.
-          • description: detailed and specific.
-          • synonyms: familiar alternatives found in the document, else [].
+          • description: detailed and semantic. Describe WHAT the field represents conceptually,
+            not just its label.
+          • synonyms: meaningful alternatives found across ALL pages of the document.
+            Include labels from different document types that refer to the same concept.
+            Broader synonyms improve extraction accuracy across heterogeneous documents.
           • type: one of "String", "Number", "Date", "Integer", "Time", or "Boolean".
           • fieldFormat: output format if relevant (e.g., "YYYY-MM-DD" for dates), otherwise null.
           • useVisionExtraction: false unless the value is purely visual (e.g. signature).

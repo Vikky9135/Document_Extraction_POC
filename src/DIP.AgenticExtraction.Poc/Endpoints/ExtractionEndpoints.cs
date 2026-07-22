@@ -190,8 +190,6 @@ public static class ExtractionEndpoints
                 request.ClassificationName, ocrBlobNames.Count);
             logger.LogInformation("Goal: {Goal}", request.ExtractionGoal);
             logger.LogInformation("Describe: {Desc}", request.DescribeWhatToExtract);
-            logger.LogInformation("Chunking: SchemaChunk={S}pg, ExtractionChunk={E}pg, Overlap={O}pg",
-                options.SchemaChunkPages, options.ExtractionChunkPages, options.ExtractionOverlapPages);
             logger.LogInformation("═══════════════════════════════════════════════════════════════");
 
             var userPrompt = string.IsNullOrWhiteSpace(request.ExtractionGoal)
@@ -327,11 +325,41 @@ public static class ExtractionEndpoints
                     allInstances.Count, totalLlmCalls, totalTimeMs);
                 logger.LogInformation("│  └─ Document [{Index}/{Total}]: DONE", i + 1, ocrDocuments.Count);
 
+                // Pivot from instance-centric to field-centric:
+                // { "fieldName": { count, values: [ { value, confidence, ... }, ... ] } }
+                var fieldCentric = new Dictionary<string, List<object>>();
+                for (int idx = 0; idx < allInstances.Count; idx++)
+                {
+                    foreach (var (fieldName, fieldResult) in allInstances[idx].RequestedFields)
+                    {
+                        if (!fieldCentric.TryGetValue(fieldName, out var list))
+                        {
+                            list = [];
+                            fieldCentric[fieldName] = list;
+                        }
+                        list.Add(new
+                        {
+                            fieldResult.Value,
+                            fieldResult.Confidence,
+                            fieldResult.IsVerified,
+                            fieldResult.Source,
+                            fieldResult.RawStr,
+                            fieldResult.BoundingRegions,
+                            instanceIndex = idx,
+                            sourcePages = allInstances[idx].SourcePages
+                        });
+                    }
+                }
+
+                // Wrap each field with its own instanceCount
+                var fieldsWithCount = fieldCentric.ToDictionary(
+                    kvp => kvp.Key,
+                    kvp => (object)new { instanceCount = kvp.Value.Count, values = kvp.Value });
+
                 var docResult = new
                 {
                     pageCount = ocr.PageCount,
-                    instanceCount = allInstances.Count,
-                    instances = allInstances.Select(inst => inst.RequestedFields).ToList(),
+                    fields = fieldsWithCount,
                     metadata = new ExtractionMetadata
                     {
                         LlmCallCount = totalLlmCalls,

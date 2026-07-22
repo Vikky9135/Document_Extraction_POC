@@ -21,7 +21,8 @@ public interface IExtractionAgent
 /// <summary>One extracted entity instance (e.g., one invoice within a multi-invoice document).</summary>
 public record ExtractionInstance(
     Dictionary<string, ExtractionFieldResult> Fields,
-    Dictionary<string, List<Dictionary<string, object?>>> Tables);
+    Dictionary<string, List<Dictionary<string, object?>>> Tables,
+    List<int> SourcePages);
 
 // Phase 5 — uses O3 (reasoning_effort: high).
 public class ExtractionAgent : IExtractionAgent
@@ -79,22 +80,22 @@ public class ExtractionAgent : IExtractionAgent
         {
             foreach (var instanceEl in instancesArray.EnumerateArray())
             {
-                var (fields, tables) = ParseSingleInstance(instanceEl, schema);
-                instances.Add(new ExtractionInstance(fields, tables));
+                var (fields, tables, sourcePages) = ParseSingleInstance(instanceEl, schema);
+                instances.Add(new ExtractionInstance(fields, tables, sourcePages));
             }
         }
 
         // Fallback: if no "instances" wrapper, treat root as a single instance (backward compat)
         if (instances.Count == 0)
         {
-            var (fields, tables) = ParseSingleInstance(root, schema);
-            instances.Add(new ExtractionInstance(fields, tables));
+            var (fields, tables, sourcePages) = ParseSingleInstance(root, schema);
+            instances.Add(new ExtractionInstance(fields, tables, sourcePages));
         }
 
         return instances;
     }
 
-    private static (Dictionary<string, ExtractionFieldResult>, Dictionary<string, List<Dictionary<string, object?>>>)
+    private static (Dictionary<string, ExtractionFieldResult>, Dictionary<string, List<Dictionary<string, object?>>>, List<int>)
         ParseSingleInstance(JsonElement root, ExtractionSchema schema)
     {
         var fields = new Dictionary<string, ExtractionFieldResult>();
@@ -137,7 +138,18 @@ public class ExtractionAgent : IExtractionAgent
             tables[table.Name] = rows;
         }
 
-        return (fields, tables);
+        // Parse sourcePages (which pages this instance's data comes from)
+        var sourcePages = new List<int>();
+        if (root.TryGetProperty("sourcePages", out var sp) && sp.ValueKind == JsonValueKind.Array)
+        {
+            foreach (var page in sp.EnumerateArray())
+            {
+                if (page.ValueKind == JsonValueKind.Number)
+                    sourcePages.Add(page.GetInt32());
+            }
+        }
+
+        return (fields, tables, sourcePages);
     }
 
     private static object? ConvertValue(JsonElement el, FieldType type) => type switch

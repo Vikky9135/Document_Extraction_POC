@@ -33,6 +33,16 @@ public static class DynamicSchemaGenerator
             required.Add(table.Name);
         }
 
+        // Add sourcePages — forces the model to declare which pages each instance comes from
+        properties["sourcePages"] = new JsonObject
+        {
+            ["type"]        = "array",
+            ["description"] = "Page numbers (1-indexed) from which this instance's data was extracted. " +
+                              "Each instance MUST have distinct source pages. Two instances must NOT share the same pages.",
+            ["items"]       = new JsonObject { ["type"] = "integer" }
+        };
+        required.Add("sourcePages");
+
         // Wrap in an "instances" array to support multi-instance extraction
         var instanceSchema = new JsonObject
         {
@@ -78,7 +88,7 @@ public static class DynamicSchemaGenerator
             properties[field.Name] = new JsonObject
             {
                 ["type"]                 = "object",
-                ["description"]          = $"Field: {field.Name}. Extracted value: '{extractedStr}'. {field.Description} Verify this value is present and correct in the source document.",
+                ["description"]          = $"Field: {field.Name}. Extracted value: '{extractedStr}'. {field.Description} Verify this value is present and correct in the source document. Also verify the extracted value's unit matches what the field expects (e.g., do not accept a percentage where a monetary amount is expected, or vice versa).",
                 ["additionalProperties"] = false,
                 ["required"]             = new JsonArray("correct", "feedback"),
                 ["properties"]           = new JsonObject
