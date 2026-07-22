@@ -24,12 +24,12 @@ public record ExtractionInstance(
     Dictionary<string, List<Dictionary<string, object?>>> Tables,
     List<int> SourcePages);
 
-// Phase 5 — uses O3 (reasoning_effort: high).
+// Phase 5 — uses gpt-5.4 (accuracy-critical).
 public class ExtractionAgent : IExtractionAgent
 {
-    private readonly ChatClient _o3Client;
+    private readonly ChatClient _client;
 
-    public ExtractionAgent(ChatClient o3Client) => _o3Client = o3Client;
+    public ExtractionAgent(ChatClient client) => _client = client;
 
     public async Task<(List<ExtractionInstance> Instances, int LlmCallCount)>
         ExtractFieldsAsync(
@@ -56,8 +56,8 @@ public class ExtractionAgent : IExtractionAgent
             new UserChatMessage(structuredText)
         };
 
-        // 3. Call Azure OpenAI O3 with strict structured output.
-        var response = await _o3Client.CompleteChatAsync(messages, new ChatCompletionOptions
+        // 3. Call Azure OpenAI with strict structured output.
+        var response = await _client.CompleteChatAsync(messages, new ChatCompletionOptions
         {
             ResponseFormat = responseFormat
         }, ct);

@@ -18,12 +18,12 @@ public interface IVerificationAgent
         CancellationToken ct = default);
 }
 
-// Phase 6 — uses O3 (reasoning_effort: high) with a skeptical system prompt.
+// Phase 6 — uses gpt-5.4 with a skeptical system prompt.
 public class VerificationAgent : IVerificationAgent
 {
-    private readonly ChatClient _o3Client;
+    private readonly ChatClient _client;
 
-    public VerificationAgent(ChatClient o3Client) => _o3Client = o3Client;
+    public VerificationAgent(ChatClient client) => _client = client;
 
     public async Task<VerificationResult> VerifyFieldsAsync(
         ExtractionSchema schema,
@@ -58,7 +58,7 @@ public class VerificationAgent : IVerificationAgent
             new UserChatMessage(userMessage)
         };
 
-        var response = await _o3Client.CompleteChatAsync(messages, new ChatCompletionOptions
+        var response = await _client.CompleteChatAsync(messages, new ChatCompletionOptions
         {
             ResponseFormat = responseFormat
         }, ct);
