@@ -4,19 +4,25 @@ public class AgenticExtractionOptions
 {
     public const string Section = "AgenticExtraction";
 
-    public string O3DeploymentName { get; set; } = "o3";              // Phases 5,6,7 — reasoning model
-    public string Gpt5MiniDeploymentName { get; set; } = "gpt-5-mini"; // Phase 8 — fast + cheap formatting
-    public string Gpt5DeploymentName { get; set; } = "gpt-5";         // Phases 4,9 — schema gen + code gen
+    // Model deployments
+    public string Gpt54DeploymentName { get; set; } = "gpt-5.4";       // Schema gen, extraction, verification, code gen
+    public string Gpt54MiniDeploymentName { get; set; } = "gpt-5.4-mini"; // Correction, merge, dedup, formatting
     public string AzureOpenAIEndpoint { get; set; } = "";
-    public string AzureOpenAIKey { get; set; } = "";              // Prefer managed identity in production
+    public string AzureOpenAIKey { get; set; } = "";
+
+    // Document Intelligence (OCR)
     public string DocumentIntelligenceEndpoint { get; set; } = "";
     public string DocumentIntelligenceKey { get; set; } = "";
+
+    // Blob storage
     public string BlobConnectionString { get; set; } = "";
     public string BlobContainerName { get; set; } = "agentic-poc-jobs";
     public int MaxFileSizeMb { get; set; } = 50;
-    public int MaxOcrPagesPerChunk { get; set; } = 100;
 
-    // o3 reasoning effort: "low" | "medium" | "high"
-    // Extraction + Verification = high, Correction = medium
-    public string O3ReasoningEffort { get; set; } = "high";
+    // Chunking — page-based splitting for large documents
+    // gpt-5.4 has 922K input but the cheap pricing tier is ≤272K.
+    // At ~1,000 tokens/page, 200 pages ≈ 200K tokens (under the 272K boundary).
+    public int SchemaChunkPages { get; set; } = 200;      // Pages per chunk for schema generation
+    public int ExtractionChunkPages { get; set; } = 200;   // Pages per chunk for extraction
+    public int ExtractionOverlapPages { get; set; } = 2;   // Overlap between extraction chunks
 }

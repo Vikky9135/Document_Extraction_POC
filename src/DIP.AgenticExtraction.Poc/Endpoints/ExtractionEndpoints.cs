@@ -2,10 +2,12 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using DIP.AgenticExtraction.Poc.Models;
 using DIP.AgenticExtraction.Poc.Ocr;
+using DIP.AgenticExtraction.Poc.Options;
 using DIP.AgenticExtraction.Poc.Orchestration;
 using DIP.AgenticExtraction.Poc.Schema;
 using DIP.AgenticExtraction.Poc.Services;
 using Microsoft.AspNetCore.Mvc;
+using Microsoft.Extensions.Options;
 
 namespace DIP.AgenticExtraction.Poc.Endpoints;
 
@@ -162,10 +164,12 @@ public static class ExtractionEndpoints
             ISchemaGenerationService schemaService,
             IAgenticExtractionOrchestrator orchestrator,
             IBlobStorageService blobStorage,
+            IOptions<AgenticExtractionOptions> opts,
             ILoggerFactory loggerFactory,
             CancellationToken ct) =>
         {
             var logger = loggerFactory.CreateLogger("Extraction.Run");
+            var options = opts.Value;
 
             // ── Validate inputs ───────────────────────────────────────────────
             if (string.IsNullOrWhiteSpace(request.ClassificationName))
@@ -186,6 +190,8 @@ public static class ExtractionEndpoints
                 request.ClassificationName, ocrBlobNames.Count);
             logger.LogInformation("Goal: {Goal}", request.ExtractionGoal);
             logger.LogInformation("Describe: {Desc}", request.DescribeWhatToExtract);
+            logger.LogInformation("Chunking: SchemaChunk={S}pg, ExtractionChunk={E}pg, Overlap={O}pg",
+                options.SchemaChunkPages, options.ExtractionChunkPages, options.ExtractionOverlapPages);
             logger.LogInformation("═══════════════════════════════════════════════════════════════");
 
             var userPrompt = string.IsNullOrWhiteSpace(request.ExtractionGoal)
@@ -203,7 +209,7 @@ public static class ExtractionEndpoints
                 var ocrContext = new OcrContext
                 {
                     StructuredText = ocrData.StructuredText,
-                    RawAnalyzeResult = new object(), // Not stored — not needed for extraction
+                    RawAnalyzeResult = new object(),
                     PageCount = ocrData.PageCount,
                     Words = ocrData.Words ?? [],
                     Lines = ocrData.Lines ?? []
@@ -214,21 +220,37 @@ public static class ExtractionEndpoints
             if (ocrDocuments.Count == 0)
                 return Results.NotFound(new { error = "Could not load any OCR data for this classification." });
 
-            // ── Step 1: Schema Generation from all documents ──────────────────
+            // ── Step 1: Chunked Schema Generation ─────────────────────────────
             logger.LogInformation("┌─ STEP 1: Generating schema from {Count} document(s)...", ocrDocuments.Count);
 
-            var trainingTexts = ocrDocuments.Select(d => d.Ocr.StructuredText).ToList();
-            var schema = await schemaService.GenerateFromMultipleSamplesAsync(trainingTexts, userPrompt, ct);
+            var allSchemaChunks = new List<string>();
+            foreach (var (fileName, ocr) in ocrDocuments)
+            {
+                if (PageChunker.NeedsChunking(ocr.PageCount, options.SchemaChunkPages))
+                {
+                    var chunks = PageChunker.SplitIntoChunks(ocr.StructuredText, options.SchemaChunkPages);
+                    logger.LogInformation("│  {FileName}: {Pages} pages → {Chunks} schema chunk(s)",
+                        fileName, ocr.PageCount, chunks.Count);
+                    allSchemaChunks.AddRange(chunks.Select(c => c.Text));
+                }
+                else
+                {
+                    logger.LogInformation("│  {FileName}: {Pages} pages → single chunk (no splitting)",
+                        fileName, ocr.PageCount);
+                    allSchemaChunks.Add(ocr.StructuredText);
+                }
+            }
+
+            var schema = await schemaService.GenerateFromMultipleSamplesAsync(allSchemaChunks, userPrompt, ct);
 
             logger.LogInformation("│  Schema: Fields={F}, Tables={T}, Generation={G}, Validation={V}",
                 schema.Fields.Count, schema.TableFields.Count,
                 schema.GenerationFields.Count, schema.ValidationRules.Count);
             logger.LogInformation("└─ STEP 1 COMPLETE.\n");
 
-            // Save the final schema
             await blobStorage.SaveJsonAsync(classificationId, "final-schema.json", schema, ct);
 
-            // ── Step 2: Run extraction pipeline on each document ───────────────
+            // ── Step 2: Chunked Extraction per document ───────────────────────
             logger.LogInformation("┌─ STEP 2: Running extraction on {Count} document(s)...", ocrDocuments.Count);
 
             var extractionResults = new Dictionary<string, object>();
@@ -237,37 +259,88 @@ public static class ExtractionEndpoints
             for (int i = 0; i < ocrDocuments.Count; i++)
             {
                 var (fileName, ocr) = ocrDocuments[i];
-                var docId = $"doc-{i + 1}";
                 var baseFileName = Path.GetFileNameWithoutExtension(fileName);
                 var extractionBlobName = $"{baseFileName}.extraction.json";
 
                 logger.LogInformation("│");
-                logger.LogInformation("│  ┌─ Document [{Index}/{Total}]: {FileName}", i + 1, ocrDocuments.Count, fileName);
+                logger.LogInformation("│  ┌─ Document [{Index}/{Total}]: {FileName} ({Pages} pages)",
+                    i + 1, ocrDocuments.Count, fileName, ocr.PageCount);
 
-                var result = await orchestrator.RunAsync(
-                    docId, schema, ocr.StructuredText, userPrompt, ocr.PageCount,
-                    ocr.Lines, ocr.Words, ct);
+                List<InstanceResult> allInstances;
+                int totalLlmCalls = 0;
+                int totalCorrections = 0;
+                long totalTimeMs = 0;
 
-                logger.LogInformation("│  │  Result: {InstCount} instance(s), LLM calls: {Calls}, Corrections: {Iter}, Time: {Ms}ms",
-                    result.Instances.Count,
-                    result.Metadata.LlmCallCount, result.Metadata.CorrectionIterations,
-                    result.Metadata.ProcessingTimeMs);
+                if (PageChunker.NeedsChunking(ocr.PageCount, options.ExtractionChunkPages))
+                {
+                    var chunks = PageChunker.SplitIntoChunks(
+                        ocr.StructuredText, options.ExtractionChunkPages, options.ExtractionOverlapPages);
+                    logger.LogInformation("│  │  Chunked: {Chunks} chunk(s), overlap={Overlap}pg",
+                        chunks.Count, options.ExtractionOverlapPages);
+
+                    allInstances = [];
+                    for (int c = 0; c < chunks.Count; c++)
+                    {
+                        var chunk = chunks[c];
+                        var chunkId = $"doc-{i + 1}-chunk-{c + 1}";
+
+                        logger.LogInformation("│  │  ┌─ Chunk {C}/{Total}: pages {Start}-{End}",
+                            c + 1, chunks.Count, chunk.StartPage, chunk.EndPage);
+
+                        var result = await orchestrator.RunAsync(
+                            chunkId, schema, chunk.Text, userPrompt, chunk.PageCount,
+                            ocr.Lines, ocr.Words, ct);
+
+                        totalLlmCalls += result.Metadata.LlmCallCount;
+                        totalCorrections += result.Metadata.CorrectionIterations;
+                        totalTimeMs += result.Metadata.ProcessingTimeMs;
+
+                        logger.LogInformation("│  │  └─ Chunk {C}: {Inst} instance(s), {Calls} LLM calls",
+                            c + 1, result.Instances.Count, result.Metadata.LlmCallCount);
+
+                        allInstances.AddRange(result.Instances);
+
+                        if (c == 0 && result.GenerationScripts.Count > 0 && generationScripts.Count == 0)
+                            generationScripts = result.GenerationScripts;
+                    }
+
+                    // TODO: Deduplication of overlapping instances (by key field matching)
+                    logger.LogInformation("│  │  Total instances before dedup: {Count}", allInstances.Count);
+                }
+                else
+                {
+                    var docId = $"doc-{i + 1}";
+                    var result = await orchestrator.RunAsync(
+                        docId, schema, ocr.StructuredText, userPrompt, ocr.PageCount,
+                        ocr.Lines, ocr.Words, ct);
+
+                    allInstances = result.Instances;
+                    totalLlmCalls = result.Metadata.LlmCallCount;
+                    totalCorrections = result.Metadata.CorrectionIterations;
+                    totalTimeMs = result.Metadata.ProcessingTimeMs;
+
+                    if (i == 0 && result.GenerationScripts.Count > 0)
+                        generationScripts = result.GenerationScripts;
+                }
+
+                logger.LogInformation("│  │  Result: {InstCount} instance(s), LLM calls: {Calls}, Time: {Ms}ms",
+                    allInstances.Count, totalLlmCalls, totalTimeMs);
                 logger.LogInformation("│  └─ Document [{Index}/{Total}]: DONE", i + 1, ocrDocuments.Count);
 
-                // Save per-document extraction result (instances with only requested fields)
                 var docResult = new
                 {
                     pageCount = ocr.PageCount,
-                    instanceCount = result.Instances.Count,
-                    instances = result.Instances.Select(inst => inst.RequestedFields).ToList(),
-                    metadata = result.Metadata with { OcrPageCount = ocr.PageCount }
+                    instanceCount = allInstances.Count,
+                    instances = allInstances.Select(inst => inst.RequestedFields).ToList(),
+                    metadata = new ExtractionMetadata
+                    {
+                        LlmCallCount = totalLlmCalls,
+                        CorrectionIterations = totalCorrections,
+                        ProcessingTimeMs = totalTimeMs,
+                        OcrPageCount = ocr.PageCount
+                    }
                 };
                 await blobStorage.SaveJsonAsync(classificationId, extractionBlobName, docResult, ct);
-
-                // Capture generation scripts from first doc
-                if (i == 0 && result.GenerationScripts.Count > 0)
-                    generationScripts = result.GenerationScripts;
-
                 extractionResults[fileName] = docResult;
             }
 

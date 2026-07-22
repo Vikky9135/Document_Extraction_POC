@@ -11,9 +11,10 @@ using Serilog;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Serilog — logs to terminal console
+// Serilog — logs to terminal console (configured in appsettings.json)
 builder.Host.UseSerilog((ctx, cfg) =>
-    cfg.ReadFrom.Configuration(ctx.Configuration).WriteTo.Console());
+    cfg.ReadFrom.Configuration(ctx.Configuration));
+builder.Logging.ClearProviders();
 
 // Options
 builder.Services.Configure<AgenticExtractionOptions>(
@@ -46,25 +47,25 @@ if (!string.IsNullOrWhiteSpace(extractionOpts.AzureOpenAIEndpoint)
 {
     builder.Services.AddSingleton<IAzureOpenAIClientFactory, AzureOpenAIClientFactory>();
 
-    // Schema generation (GPT-5)
+    // Schema generation (gpt-5.4)
     builder.Services.AddSingleton<ISchemaGenerationService>(sp =>
         new SchemaGenerationService(
-            sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt5Client(),
+            sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt54Client(),
             sp.GetRequiredService<ILogger<SchemaGenerationService>>()));
 
-    // Extraction + Verification (O3)
+    // Extraction + Verification (gpt-5.4 — accuracy-critical)
     builder.Services.AddSingleton<IExtractionAgent>(sp =>
-        new ExtractionAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateO3Client()));
+        new ExtractionAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt54Client()));
     builder.Services.AddSingleton<IVerificationAgent>(sp =>
-        new VerificationAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateO3Client()));
+        new VerificationAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt54Client()));
 
-    // Formatting (GPT-5-mini)
+    // Formatting (gpt-5.4-mini — simple transformation)
     builder.Services.AddSingleton<IFormatterAgent>(sp =>
-        new FormatterAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt5MiniClient()));
+        new FormatterAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt54MiniClient()));
 
-    // Generation (GPT-5 code gen + Roslyn)
+    // Generation (gpt-5.4 — needs precise code output)
     builder.Services.AddSingleton<IGenerationAgent>(sp =>
-        new GenerationAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt5Client()));
+        new GenerationAgent(sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt54Client()));
 
     // Orchestrator (Phases 5-9)
     builder.Services.AddSingleton<IAgenticExtractionOrchestrator>(sp =>
@@ -73,7 +74,7 @@ if (!string.IsNullOrWhiteSpace(extractionOpts.AzureOpenAIEndpoint)
             sp.GetRequiredService<IVerificationAgent>(),
             sp.GetRequiredService<IFormatterAgent>(),
             sp.GetRequiredService<IGenerationAgent>(),
-            sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt5MiniClient(),
+            sp.GetRequiredService<IAzureOpenAIClientFactory>().CreateGpt54MiniClient(),
             sp.GetRequiredService<ILogger<AgenticExtractionOrchestrator>>()));
 }
 else
