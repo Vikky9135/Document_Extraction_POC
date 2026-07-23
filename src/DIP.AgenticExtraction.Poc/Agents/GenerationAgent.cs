@@ -21,14 +21,14 @@ public class ScriptGlobals
 
 public interface IGenerationAgent
 {
-    // Phase 9 — GPT-5 writes a C# expression per computed field; Roslyn executes it.
+    // Phase 9 — GPT-5 writes a C# script per computed field; Roslyn executes it.
     Task<GenerationResult> ComputeAsync(
         ExtractionSchema schema,
         IReadOnlyDictionary<string, ExtractionFieldResult> fields,
         CancellationToken ct = default);
 }
 
-// Phase 9 — uses GPT-5 for code gen + Roslyn (CSharpScript) for deterministic execution.
+// Phase 9 — uses GPT-5 for C# script gen + Roslyn (CSharpScript) for deterministic execution.
 public class GenerationAgent : IGenerationAgent
 {
     private readonly ChatClient _gpt5Client;
@@ -68,7 +68,7 @@ public class GenerationAgent : IGenerationAgent
         // Process sequentially — a later field may depend on an earlier computed value.
         foreach (var field in schema.GenerationFields)
         {
-            // 1. Ask GPT-5 to write a single C# expression.
+            // 1. Ask GPT-5 to write a C# script for the computed field.
             var dataJson = JsonSerializer.Serialize(working.ToDictionary(
                 kvp => kvp.Key,
                 kvp => kvp.Value.Value?.ToString() ?? ""));
@@ -81,11 +81,12 @@ public class GenerationAgent : IGenerationAgent
                     $"RESULT TYPE: {field.Type}\n\n" +
                     $"AVAILABLE DATA (Dictionary<string, ExtractionFieldResult> Data — access via Data[\"name\"].Value):\n" +
                     $"{dataJson}\n\n" +
-                    "Write a single C# expression that computes the result. " +
+                    "Write a C# script that computes the result. " +
                     "Use Data[\"fieldName\"].Value to access extracted values and cast as needed " +
                     "(e.g. double.Parse(Data[\"totalAmount\"].Value?.ToString() ?? \"0\")). " +
                     "Use the Today variable for the current date. " +
-                    "Return ONLY the expression — no method, no class, no semicolon.")
+                    "IMPORTANT: Declare a result variable, assign to it in branches, and put it alone on the last line. " +
+                    "Return ONLY the script — no method wrapper, no class.")
             };
 
             llmCalls++;
@@ -140,7 +141,7 @@ public class GenerationAgent : IGenerationAgent
         return new GenerationResult(results, llmCalls, scripts);
     }
 
-    // Strips markdown fences / stray backticks and trailing semicolons the model may add.
+    // Strips markdown fences / stray backticks the model may add.
     private static string CleanCode(string raw)
     {
         var code = raw.Trim();
@@ -152,6 +153,6 @@ public class GenerationAgent : IGenerationAgent
             if (code.EndsWith("```")) code = code[..^3];
         }
 
-        return code.Trim().TrimEnd(';').Trim();
+        return code.Trim();
     }
 }
