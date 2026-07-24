@@ -29,6 +29,23 @@ public static class SystemPrompts
         - "validationRules": constraints to check AFTER extraction (see VALIDATION section below).
 
         =====================
+        CRITICAL: EXACT SCHEMA FIELD NAMES (MUST USE)
+        =====================
+        The schema is the single source of truth for output keys.
+
+        - Use ONLY key names that exist in the provided schema.
+        - For each table in "tableFields", the output key MUST exactly match table.name.
+        - For each row, each column key MUST exactly match that table's subFields[].name.
+        - Do NOT use synonyms, document labels, or prior examples as JSON keys.
+        - Do NOT rename keys (e.g., do NOT convert salesTax -> salesTaxAmount, invoiceLineItems -> invoiceItems, date -> itemDate, price -> unitPrice, tax -> taxAmount).
+
+        Pre-return key audit (mandatory):
+        1) For each instance, top-level keys must be exactly:
+           all fields[].name + all tableFields[].name + "sourcePages".
+        2) For each table row, keys must be exactly that table's subFields[].name.
+        3) If any key is not exact, rewrite the JSON before returning.
+
+        =====================
         CORE EXTRACTION RULES
         =====================
         - ONLY extract information explicitly VISIBLE in the provided document.
@@ -132,44 +149,126 @@ public static class SystemPrompts
         =====================
         MULTI-INSTANCE EXTRACTION
         =====================
-        A single document may contain MULTIPLE instances. You MUST extract ALL instances found.
+        A single document may contain MULTIPLE instances of the same entity (e.g., multiple invoices,
+        multiple receipts, multiple claims in one PDF). You MUST extract ALL instances found.
         Return an array of instances under the "instances" key — even if there is only one instance.
+        Each instance is an independent set of field values following the schema.
 
         =====================
-        SCHEMA SHAPE
+        SCHEMA SHAPE YOU WILL RECEIVE
         =====================
-        - "fields": standalone values. Each has role "extract" or "source". Extract both identically.
-        - "tableFields": genuine repeating tables with "subFields". Extract EVERY row.
-        - "generationFields": derived values — DO NOT compute them. Return null values.
+        - "fields": standalone values present in the document. Each has a "role":
+            • "extract" : a value the user wants as output.
+            • "source"  : a present value needed to compute a generation field.
+          Extract BOTH "extract" and "source" fields the same way — they are physically in the document.
+        - "tableFields": genuine repeating tables. Each has "subFields" (columns). Extract EVERY row.
+        - "generationFields": DERIVED/computed values that are NOT in the document. DO NOT compute,
+          infer, or fabricate them here. They are produced by a later generation step.
+        - "validationRules": constraints to check AFTER extraction (see VALIDATION section below).
 
         =====================
-        CORE RULES
+        CRITICAL: EXACT SCHEMA FIELD NAMES (MUST USE)
+        =====================
+        The schema is the single source of truth for output keys.
+
+        - Use ONLY key names that exist in the provided schema.
+        - For each table in "tableFields", the output key MUST exactly match table.name.
+        - For each row, each column key MUST exactly match that table's subFields[].name.
+        - Do NOT use synonyms, document labels, or prior examples as JSON keys.
+        - Do NOT rename keys (e.g., do NOT convert salesTax -> salesTaxAmount, invoiceLineItems -> invoiceItems, date -> itemDate, price -> unitPrice, tax -> taxAmount).
+
+        Pre-return key audit (mandatory):
+        1) For each instance, top-level keys must be exactly:
+           all fields[].name + all tableFields[].name + "sourcePages".
+        2) For each table row, keys must be exactly that table's subFields[].name.
+        3) If any key is not exact, rewrite the JSON before returning.
+
+        =====================
+        CORE EXTRACTION RULES
         =====================
         - ONLY extract information explicitly VISIBLE in the provided document.
         - NEVER infer, assume, or fabricate any information.
-        - Every "fields" entry and every "subFields" column MUST be present in output.
+        - Every "fields" entry and every "subFields" column defined in the schema MUST be present in output.
         - Do not add, remove, or rename schema keys.
+        - For "tableFields", extract every row that appears in the document; do not drop or merge rows.
         - Use the provided feedback to improve the accuracy of your extraction for each specific field.
-        - If the document contains multiple instances, extract ALL of them.
-        - Each instance MUST include a "sourcePages" array listing which page(s) the data comes from.
-        - Two instances MUST NOT share the same source pages.
+        - If the document contains MULTIPLE instances (e.g., multiple invoices), extract each one
+          as a separate instance in the array. Look for page breaks, repeated headers, or distinct
+          entity boundaries to identify separate instances.
+
+        =====================
+        INSTANCE BOUNDARY RULES (CRITICAL)
+        =====================
+        - Each instance MUST represent exactly ONE logical entity (one invoice, one receipt, one claim).
+        - ALL field values within a single instance MUST come from the SAME logical entity/section.
+        - NEVER mix values from different entities into one instance.
+        - Use these signals to identify entity boundaries:
+            • A new page with a new header/title (e.g., "INVOICE", "Receipt", "Statement")
+            • A different entity identifier (different invoice number, receipt number, etc.)
+            • A different sender/recipient combination
+            • A visually distinct section with its own totals/summary
+        - If a field is not present in a particular entity, return null — do NOT borrow the value
+          from another entity on a different page.
+        - If the only matching value you can find is on a DIFFERENT page than the entity you are
+          extracting, return null. Do NOT cross page boundaries to fill missing fields.
+        - Use semantic matching: match fields by meaning, not exact label. If the document uses
+          a different label than the schema field name, treat the closest semantic equivalent
+          as the match.
+        - If two pages contain different entities, they are separate instances. Do NOT copy values
+          from one entity's page into another entity's instance.
+
+        =====================
+        sourcePages — PAGE TRACKING (REQUIRED)
+        =====================
+        - Each instance MUST include a "sourcePages" array listing which page(s) the instance's data
+          comes from (1-indexed).
+        - Two different instances MUST NOT share the same source pages (no overlap).
+        - If a document has 3 pages with 3 different entities, you must produce 3 instances, each
+          with distinct sourcePages (e.g., [1], [2], [3]).
+        - NEVER create two instances from the same page unless the page genuinely contains two
+          separate entities (e.g., two invoices side by side — which is extremely rare).
+
+        =====================
+        SELF-CHECK BEFORE RETURNING
+        =====================
+        Before returning your response, verify:
+        1. Does the number of instances match the number of distinct entities in the document?
+        2. Are all instances' sourcePages distinct (no overlap)?
+        3. Does every page that contains entity data appear in at least one instance's sourcePages?
+        4. Do any two instances have identical field values? If so, one is likely a duplicate — remove it.
+        5. For each instance, do ALL field values come from the pages listed in its sourcePages?
 
         =====================
         OUTPUT FORMAT (per extracted field / sub_field)
         =====================
         "extraction":
-          - If visible and parseable into target type: return the parsed value.
-          - If missing or unparseable: return null value (strings: "", numbers: null, arrays: [], objects: {}).
+          - If visible and parseable into the target type: return the parsed value.
+          - If missing or unparseable: return null (for numbers/integers/dates/times) or "" (for strings).
+          - CRITICAL: For number/integer fields, return null when the value is NOT explicitly present
+            in the document. Do NOT return 0 to indicate "not found" — 0 means the document
+            explicitly states zero. If you cannot find the value, return null.
+          - UNIT MISMATCH: If the field expects a monetary amount but the document only shows
+            a percentage (or vice versa), return null. Do NOT extract a percentage as if it were
+            a monetary amount, or vice versa.
 
         "confidence":
-          - High score when confidently extracted.
-          - High score when confidently absent or unparseable.
+          - High score when the value is confidently extracted.
+          - High score when a field is confidently absent or unparseable (confidence in the absence).
           - NEVER use 0 as a confidence score.
 
         "extraction_str": (non-string fields only)
-          - The exact literal text as it appears in the document.
+          - The exact literal text as it appears in the document, even if unparseable into the target type.
+          - If the value is not found in the document, return an empty string "".
 
-        For tables, extract ALL rows found in the document.
+        For "generationFields": do not produce a computed value. Return null.
+
+        =====================
+        CRITICAL: 0 vs null DISTINCTION
+        =====================
+        - null = "this value is NOT present in the document" or "I cannot find it"
+        - 0    = "the document explicitly states the value is zero" (e.g., "Tax: $0.00" or "Discount: 0%")
+        - NEVER use 0 as a substitute for "not found". This distinction is essential for downstream
+          computation fields that fall back to calculating a value when the extracted field is null.
 
         =====================
         VALIDATION
@@ -289,6 +388,19 @@ public static class SystemPrompts
           • synonyms: [] or familiar alternatives.
           • subFields: list, each with name (camelCase), type, description.
 
+        TABLE VARIANT HANDLING (CRITICAL):
+        - A document may contain multiple table regions across pages. Determine whether they are:
+          1) DISTINCT table concepts (different row meaning/business purpose), or
+          2) VARIANTS of the SAME table concept (same row meaning, but header wording/order differs).
+        - If DISTINCT, create MULTIPLE tableFields (one per table concept).
+        - If SAME concept, create ONE unified tableField and:
+          • merge/union all relevant columns seen across pages/documents,
+          • use canonical subField names,
+          • preserve alternate header labels in table synonyms and subField descriptions.
+        - Do NOT split into separate tables only because column labels differ slightly
+          (e.g., "Qty" vs "Quantity", "Unit Price" vs "Price Each").
+        - Do NOT merge tables that represent different row entities even if some columns overlap.
+
         ## Critical Rules:
         - Include ONLY:
           1. Fields the user explicitly asked to extract (role: "extract").
@@ -348,6 +460,17 @@ public static class SystemPrompts
           • description: what one row represents.
           • synonyms: [] or familiar alternatives.
           • subFields: list, each with: name (camelCase), type, description.
+
+        TABLE VARIANT HANDLING (CRITICAL):
+        - The same document can contain multiple tables across pages.
+        - Decide if table regions are DISTINCT concepts vs VARIANTS of one concept:
+          • DISTINCT concept (different row meaning/business purpose) -> separate tableFields.
+          • SAME concept with label/order differences -> one unified tableField.
+        - For unified table variants, union all meaningful columns into subFields so data is not lost
+          when one variant has extra columns.
+        - Preserve alternate table/column labels in synonyms.
+        - Do NOT create separate tables only due to minor header wording differences.
+        - Do NOT merge genuinely different table concepts just because some columns look similar.
 
         =====================
         "generationFields" (derived/computed values, NOT present in the document)
@@ -414,13 +537,17 @@ public static class SystemPrompts
           pick the most descriptive name as the canonical "name" and add ALL other
           variant names into the "synonyms" array. Never discard alternate names —
           they are needed during extraction to locate values in different document formats.
-        - For tableFields, combine redundant tables by name, merge their sub_fields.
-          Apply the same synonym preservation rule to sub_fields.
+        - For tableFields, do semantic consolidation (NOT name-only consolidation):
+          • If two tables represent the SAME row concept, merge into ONE table.
+          • If two tables represent DIFFERENT row concepts, keep them as SEPARATE tables.
+          • Do not rely only on table name matching.
+        - When merging same-concept tables, create a union of subFields so no variant-specific
+          column is lost. Preserve alternate column labels in table synonyms and subField descriptions.
         - Preserve all existing synonyms from the input and add newly discovered variants.
         - Ensure that only the fields requested by the user are in your final output.
-        - Do NOT rename fields. The provided field names are normalized and final.
-          Only remove duplicates and merge descriptions/synonyms. If two fields are
-          semantically identical, keep the first one's name and add the other as a synonym.
+        - Do NOT arbitrarily rename normalized fields.
+          For semantically identical duplicates, keep the first canonical name and add other
+          variants as synonyms.
 
         ## Generation Fields & Validation Rules
         In addition to deduplicating extraction fields, you must also produce:

@@ -356,10 +356,27 @@ public static class ExtractionEndpoints
                     kvp => kvp.Key,
                     kvp => (object)new { instanceCount = kvp.Value.Count, values = kvp.Value });
 
+                var tableFields = allInstances.Select((inst, idx) =>
+                {
+                    var tablesByPage = TablePageAlignmentService.GroupRowsByPage(
+                        inst.TableFields,
+                        inst.SourcePages,
+                        ocr.Lines);
+
+                    return new
+                    {
+                        instanceIndex = idx,
+                        sourcePages = inst.SourcePages,
+                        tables = inst.TableFields,
+                        tablesByPage
+                    };
+                }).ToList();
+
                 var docResult = new
                 {
                     pageCount = ocr.PageCount,
                     fields = fieldsWithCount,
+                    tableFields,
                     metadata = new ExtractionMetadata
                     {
                         LlmCallCount = totalLlmCalls,

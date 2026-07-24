@@ -50,9 +50,13 @@ public class ExtractionAgent : IExtractionAgent
             true);
 
         // 2. Build messages — system prompt + OCR structured text.
+        var systemPrompt = feedbackOverrides is { Count: > 0 }
+            ? SystemPrompts.ExtractorFeedbackSystemPrompt
+            : SystemPrompts.ExtractorSystemPrompt;
+
         var messages = new List<ChatMessage>
         {
-            new SystemChatMessage(SystemPrompts.ExtractorSystemPrompt),
+            new SystemChatMessage(systemPrompt),
             new UserChatMessage(structuredText)
         };
 
