@@ -253,6 +253,7 @@ public static class ExtractionEndpoints
 
             var extractionResults = new Dictionary<string, object>();
             Dictionary<string, string> generationScripts = [];
+            var accumulatedFeedback = new Dictionary<string, List<string>>();
 
             for (int i = 0; i < ocrDocuments.Count; i++)
             {
@@ -292,6 +293,7 @@ public static class ExtractionEndpoints
                         totalLlmCalls += result.Metadata.LlmCallCount;
                         totalCorrections += result.Metadata.CorrectionIterations;
                         totalTimeMs += result.Metadata.ProcessingTimeMs;
+                        AccumulateFeedback(accumulatedFeedback, result.SchemaFeedback);
 
                         logger.LogInformation("│  │  └─ Chunk {C}: {Inst} instance(s), {Calls} LLM calls",
                             c + 1, result.Instances.Count, result.Metadata.LlmCallCount);
@@ -316,6 +318,7 @@ public static class ExtractionEndpoints
                     totalLlmCalls = result.Metadata.LlmCallCount;
                     totalCorrections = result.Metadata.CorrectionIterations;
                     totalTimeMs = result.Metadata.ProcessingTimeMs;
+                    AccumulateFeedback(accumulatedFeedback, result.SchemaFeedback);
 
                     if (i == 0 && result.GenerationScripts.Count > 0)
                         generationScripts = result.GenerationScripts;
@@ -391,6 +394,34 @@ public static class ExtractionEndpoints
 
             logger.LogInformation("└─ STEP 2 COMPLETE.\n");
 
+            // ── Schema Self-Improvement: persist correction hints ─────────────
+            if (accumulatedFeedback.Count > 0)
+            {
+                var improvedFields = schema.Fields.Select(f =>
+                {
+                    if (!accumulatedFeedback.TryGetValue(f.Name, out var newHints))
+                        return f;
+
+                    // Merge new hints with existing, avoiding duplicates
+                    var mergedHints = f.Hints.ToList();
+                    foreach (var hint in newHints)
+                        if (!mergedHints.Contains(hint))
+                            mergedHints.Add(hint);
+
+                    // Cap at 5 hints per field to avoid prompt bloat
+                    if (mergedHints.Count > 5)
+                        mergedHints = mergedHints.TakeLast(5).ToList();
+
+                    return f with { Hints = mergedHints };
+                }).ToList();
+
+                schema = schema with { Fields = improvedFields };
+                await blobStorage.SaveJsonAsync(classificationId, "final-schema.json", schema, ct);
+
+                logger.LogInformation("Schema self-improvement: updated {Count} field(s) with correction hints",
+                    accumulatedFeedback.Count);
+            }
+
             // Save generation scripts if any
             if (generationScripts.Count > 0)
             {
@@ -430,6 +461,26 @@ public static class ExtractionEndpoints
         .Produces(200)
         .Produces<ProblemDetails>(400)
         .Produces(404);
+    }
+
+    /// <summary>
+    /// Merges per-run schema feedback into the accumulated dictionary.
+    /// </summary>
+    private static void AccumulateFeedback(
+        Dictionary<string, List<string>> accumulated,
+        Dictionary<string, List<string>> runFeedback)
+    {
+        foreach (var (fieldName, hints) in runFeedback)
+        {
+            if (!accumulated.TryGetValue(fieldName, out var existing))
+            {
+                existing = [];
+                accumulated[fieldName] = existing;
+            }
+            foreach (var hint in hints)
+                if (!existing.Contains(hint))
+                    existing.Add(hint);
+        }
     }
 }
 

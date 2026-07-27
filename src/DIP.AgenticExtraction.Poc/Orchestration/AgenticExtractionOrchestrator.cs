@@ -59,6 +59,7 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
         var sw = System.Diagnostics.Stopwatch.StartNew();
         int totalLlmCalls = 0;
         int correctionIterations = 0;
+        var schemaFeedback = new Dictionary<string, List<string>>();
 
         // ── PHASE 5: Initial Extraction (multi-instance) ──────────────────────
         _logger.LogInformation("[{JobId}] Phase 5: Extracting {N} fields, {T} tables (multi-instance)",
@@ -164,6 +165,24 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
                 }
             }
 
+            // ── Schema self-improvement: collect successful correction feedback ──
+            // When a field failed verification, was re-extracted with feedback, and
+            // then passed verification, that feedback is valuable for future runs.
+            foreach (var (name, verdict) in verification.Fields)
+            {
+                if (verdict.Correct && !string.IsNullOrWhiteSpace(verdict.Feedback))
+                {
+                    // Feedback that led to a successful correction — persist as a hint
+                    if (!schemaFeedback.TryGetValue(name, out var feedbackList))
+                    {
+                        feedbackList = [];
+                        schemaFeedback[name] = feedbackList;
+                    }
+                    if (!feedbackList.Contains(verdict.Feedback))
+                        feedbackList.Add(verdict.Feedback);
+                }
+            }
+
             // ── PHASE 8: Formatter ────────────────────────────────────────────
             var formatted = await _formatterAgent.FormatAsync(schema, fields, ct);
             totalLlmCalls += formatted.FormatterCallCount;
@@ -205,6 +224,7 @@ public class AgenticExtractionOrchestrator : IAgenticExtractionOrchestrator
             Status            = JobStatus.Completed,
             Instances         = instanceResults,
             GenerationScripts = generationScripts,
+            SchemaFeedback    = schemaFeedback,
             Metadata          = new ExtractionMetadata
             {
                 LlmCallCount         = totalLlmCalls,

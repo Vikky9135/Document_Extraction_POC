@@ -21,7 +21,13 @@ public record GenericField
     public bool UseVisionExtraction { get; init; }  // Use page images for this field
     public FieldRole Role { get; init; } = FieldRole.Extract;  // "extract" or "source"
 
-    // Returns description + synonyms string — used in JSON Schema "description" field.
+    /// <summary>
+    /// Accumulated correction hints from past extraction runs.
+    /// Persisted into final-schema.json so future runs benefit from past corrections.
+    /// </summary>
+    public List<string> Hints { get; init; } = [];
+
+    // Returns description + synonyms + hints string — used in JSON Schema "description" field.
     // On re-extraction pass, feedbackText is appended here.
     public string GetDescription(string? feedbackText = null)
     {
@@ -30,6 +36,11 @@ public record GenericField
         if (Synonyms.Count > 0)
         {
             sb.Append(" Synonyms: ").Append(string.Join(", ", Synonyms)).Append('.');
+        }
+
+        if (Hints.Count > 0)
+        {
+            sb.Append(" HINTS FROM PAST CORRECTIONS: ").Append(string.Join("; ", Hints)).Append('.');
         }
 
         if (!string.IsNullOrWhiteSpace(feedbackText))
